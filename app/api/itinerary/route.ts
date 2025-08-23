@@ -57,7 +57,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json<Itinerary>(mockResponse(intent, 'OPENAI_API_KEY missing; returning mock'), { status: 200 });
   }
 
-  // Try real OpenAI; on any error (incl 429), fall back to mock
   try {
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey });
@@ -104,3 +103,4 @@ async function safeJson(req: Request): Promise<unknown> {
     return {};
   }
 }
+
