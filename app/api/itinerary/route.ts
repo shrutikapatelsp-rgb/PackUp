@@ -1,41 +1,90 @@
-import { NextRequest, NextResponse } from 'next/server';
-import OpenAI from 'openai';
+'use client';
+import { useState } from 'react';
 
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+// ---- Shared types (keep in sync with the API types) ----
+type Flight = { provider: string; from: string; to: string; price: number; currency: string; depart?: string; return?: string; };
+type Hotel  = { provider: string; name: string; nights: number; price: number; currency: string; };
+type Activity = { provider: string; name: string; price: number; currency: string; };
+type Itinerary = { flights: Flight[]; hotels: Hotel[]; activities: Activity[]; notes?: string; };
 
-const mockFlights = [
-  { provider: 'MockAir', from: 'BLR', to: 'IXL', price: 14500, currency: 'INR', depart: '2025-09-01', return: '2025-09-11' }
-];
-const mockHotels = [
-  { provider: 'MockStay', name: 'Leh View Inn', nights: 10, price: 32000, currency: 'INR' }
-];
-const mockActivities = [
-  { provider: 'MockTours', name: 'Khardung La Day Trip', price: 2500, currency: 'INR' }
-];
+type Intent = {
+  origin: string;
+  destination: string;
+  date_from: string;
+  date_to: string;
+  pax: number;
+  budget: number;
+  vibe: string;
+};
 
-export async function POST(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const sys = `You are Packup's itinerary planner.
-Return compact JSON with keys: flights, hotels, activities, notes.
-Do not return markdown or code fences.`;
+export default function Home() {
+  const [form, setForm] = useState<Intent>({
+    origin: 'Bangalore',
+    destination: 'Ladakh',
+    date_from: '',
+    date_to: '',
+    pax: 2,
+    budget: 80000,
+    vibe: 'scenic',
+  });
+  const [loading, setLoading] = useState<boolean>(false);
+  const [result, setResult] = useState<Itinerary | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-    const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-      { role: 'system', content: sys },
-      { role: 'user', content: JSON.stringify({ intent: body, candidate_offers: { flights: mockFlights, hotels: mockHotels, activities: mockActivities } }) }
-    ];
+  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const r = await fetch('/api/itinerary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(form),
+      });
+      const data: Itinerary = await r.json();
+      if (!r.ok) throw new Error('Request failed');
+      setResult(data);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-    const r = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages,
-      temperature: 0.2
-    });
+  const onChange =
+    <K extends keyof Intent>(key: K) =>
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const value = e.target.type === 'number' ? Number(e.target.value) : e.target.value;
+      setForm((s) => ({ ...s, [key]: value } as Intent));
+    };
 
-    const text = r.choices[0]?.message?.content ?? '{}';
-    let data: any = {};
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-    return NextResponse.json(data, { status: 200 });
-  } catch (e: any) {
-    return NextResponse.json({ error: e?.message || 'Unknown error' }, { status: 500 });
-  }
+  return (
+    <main className="max-w-3xl mx-auto p-8">
+      <h1 className="text-3xl font-bold mb-6">Packup – AI Travel Itinerary</h1>
+      <form onSubmit={submit} className="grid gap-4 bg-white p-6 rounded-xl shadow">
+        <input className="border p-2 rounded" placeholder="Origin" value={form.origin} onChange={onChange('origin')} />
+        <input className="border p-2 rounded" placeholder="Destination" value={form.destination} onChange={onChange('destination')} />
+        <input type="date" className="border p-2 rounded" value={form.date_from} onChange={onChange('date_from')} />
+        <input type="date" className="border p-2 rounded" value={form.date_to} onChange={onChange('date_to')} />
+        <input type="number" className="border p-2 rounded" placeholder="Pax" value={form.pax} onChange={onChange('pax')} />
+        <input type="number" className="border p-2 rounded" placeholder="Budget (INR)" value={form.budget} onChange={onChange('budget')} />
+        <input className="border p-2 rounded" placeholder="Vibe (scenic, adventure, chill)" value={form.vibe} onChange={onChange('vibe')} />
+        <button type="submit" disabled={loading} className="bg-blue-600 text-white py-2 rounded hover:bg-blue-700">
+          {loading ? 'Thinking…' : 'Generate Itinerary'}
+        </button>
+      </form>
+
+      {error && <p className="text-red-600 mt-4">Error: {error}</p>}
+
+      {result && (
+        <div className="mt-6 bg-gray-100 p-4 rounded">
+          <h2 className="text-xl font-semibold mb-2">Result</h2>
+          <pre className="whitespace-pre-wrap text-sm">{JSON.stringify(result, null, 2)}</pre>
+        </div>
+      )}
+    </main>
+  );
 }
+
