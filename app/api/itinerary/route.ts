@@ -1,90 +1,106 @@
-'use client';
-import { useState } from 'react';
+export const runtime = 'nodejs';
 
-// ---- Shared types (keep in sync with the API types) ----
+import type { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
+
+// ---- Types ----
+type ItinIntent = {
+  origin?: string;
+  destination?: string;
+  date_from?: string;
+  date_to?: string;
+  pax?: number;
+  budget?: number;
+  vibe?: string;
+};
+
 type Flight = { provider: string; from: string; to: string; price: number; currency: string; depart?: string; return?: string; };
 type Hotel  = { provider: string; name: string; nights: number; price: number; currency: string; };
 type Activity = { provider: string; name: string; price: number; currency: string; };
-type Itinerary = { flights: Flight[]; hotels: Hotel[]; activities: Activity[]; notes?: string; };
 
-type Intent = {
-  origin: string;
-  destination: string;
-  date_from: string;
-  date_to: string;
-  pax: number;
-  budget: number;
-  vibe: string;
+type Itinerary = {
+  flights: Flight[];
+  hotels: Hotel[];
+  activities: Activity[];
+  notes?: string;
 };
 
-export default function Home() {
-  const [form, setForm] = useState<Intent>({
-    origin: 'Bangalore',
-    destination: 'Ladakh',
-    date_from: '',
-    date_to: '',
-    pax: 2,
-    budget: 80000,
-    vibe: 'scenic',
-  });
-  const [loading, setLoading] = useState<boolean>(false);
-  const [result, setResult] = useState<Itinerary | null>(null);
-  const [error, setError] = useState<string | null>(null);
+type ChatMessage = { role: 'system' | 'user'; content: string };
 
-  const submit = async (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    setLoading(true);
-    setError(null);
-    setResult(null);
-    try {
-      const r = await fetch('/api/itinerary', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
-      });
-      const data: Itinerary = await r.json();
-      if (!r.ok) throw new Error('Request failed');
-      setResult(data);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setError(msg);
-    } finally {
-      setLoading(false);
-    }
-  };
+// ---- Mock Data ----
+const MOCK: Itinerary = {
+  flights: [
+    { provider: 'MockAir', from: 'BLR', to: 'IXL', price: 14500, currency: 'INR', depart: '2025-09-01', return: '2025-09-11' }
+  ],
+  hotels: [
+    { provider: 'MockStay', name: 'Leh View Inn', nights: 10, price: 32000, currency: 'INR' }
+  ],
+  activities: [
+    { provider: 'MockTours', name: 'Khardung La Day Trip', price: 2500, currency: 'INR' }
+  ],
+};
 
-  const onChange =
-    <K extends keyof Intent>(key: K) =>
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const value = e.target.type === 'number' ? Number(e.target.value) : e.target.value;
-      setForm((s) => ({ ...s, [key]: value } as Intent));
-    };
-
-  return (
-    <main className="max-w-3xl mx-auto p-8">
-      <h1 className="text-3xl font-bold mb-6">Packup – AI Travel Itinerary</h1>
-      <form onSubmit={submit} className="grid gap-4 bg-white p-6 rounded-xl shadow">
-        <input className="border p-2 rounded" placeholder="Origin" value={form.origin} onChange={onChange('origin')} />
-        <input className="border p-2 rounded" placeholder="Destination" value={form.destination} onChange={onChange('destination')} />
-        <input type="date" className="border p-2 rounded" value={form.date_from} onChange={onChange('date_from')} />
-        <input type="date" className="border p-2 rounded" value={form.date_to} onChange={onChange('date_to')} />
-        <input type="number" className="border p-2 rounded" placeholder="Pax" value={form.pax} onChange={onChange('pax')} />
-        <input type="number" className="border p-2 rounded" placeholder="Budget (INR)" value={form.budget} onChange={onChange('budget')} />
-        <input className="border p-2 rounded" placeholder="Vibe (scenic, adventure, chill)" value={form.vibe} onChange={onChange('vibe')} />
-        <button type="submit" disabled={loading} className="bg-blue-600 text-white py-2 rounded hover:bg-blue-700">
-          {loading ? 'Thinking…' : 'Generate Itinerary'}
-        </button>
-      </form>
-
-      {error && <p className="text-red-600 mt-4">Error: {error}</p>}
-
-      {result && (
-        <div className="mt-6 bg-gray-100 p-4 rounded">
-          <h2 className="text-xl font-semibold mb-2">Result</h2>
-          <pre className="whitespace-pre-wrap text-sm">{JSON.stringify(result, null, 2)}</pre>
-        </div>
-      )}
-    </main>
-  );
+function mockResponse(intent: ItinIntent, note: string): Itinerary {
+  return { ...MOCK, notes: `${note} | intent=${JSON.stringify(intent)}` };
 }
 
+export async function POST(req: NextRequest) {
+  const intent = (await safeJson(req)) as ItinIntent;
+
+  // Force mock via env
+  if (process.env.USE_MOCK === '1') {
+    return NextResponse.json<Itinerary>(mockResponse(intent, 'Mock mode enabled via USE_MOCK=1'), { status: 200 });
+  }
+
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return NextResponse.json<Itinerary>(mockResponse(intent, 'OPENAI_API_KEY missing; returning mock'), { status: 200 });
+  }
+
+  // Try real OpenAI; on any error (incl 429), fall back to mock
+  try {
+    const { default: OpenAI } = await import('openai');
+    const client = new OpenAI({ apiKey });
+
+    const sys =
+      "You are Packup's itinerary planner. Return compact JSON with keys: flights, hotels, activities, notes. " +
+      "Use realistic but concise results. If input is vague, assume sensible defaults. Output pure JSON only.";
+
+    const messages: ChatMessage[] = [
+      { role: 'system', content: sys },
+      { role: 'user', content: JSON.stringify({ intent, candidate_offers: MOCK }) }
+    ];
+
+    const r = await client.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages,
+      temperature: 0.2,
+    });
+
+    const text = r.choices?.[0]?.message?.content ?? '{}';
+
+    try {
+      const json = JSON.parse(text) as Partial<Itinerary>;
+      const result: Itinerary = {
+        flights: Array.isArray(json.flights) ? (json.flights as Flight[]) : MOCK.flights,
+        hotels: Array.isArray(json.hotels) ? (json.hotels as Hotel[]) : MOCK.hotels,
+        activities: Array.isArray(json.activities) ? (json.activities as Activity[]) : MOCK.activities,
+        notes: typeof json.notes === 'string' ? json.notes : 'AI response parsed; some fields defaulted',
+      };
+      return NextResponse.json<Itinerary>(result, { status: 200 });
+    } catch {
+      return NextResponse.json<Itinerary>(mockResponse(intent, 'Model returned non-JSON; using mock'), { status: 200 });
+    }
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return NextResponse.json<Itinerary>(mockResponse(intent, `OpenAI error: ${msg}; returning mock`), { status: 200 });
+  }
+}
+
+async function safeJson(req: Request): Promise<unknown> {
+  try {
+    return await req.json();
+  } catch {
+    return {};
+  }
+}
