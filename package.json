@@ -1,3 +1,4 @@
+"engines": { "node": ">=18 <=22" }
 {
   "name": "packup",
   "version": "0.1.0",
