@@ -6,11 +6,11 @@
     "node": ">=18 <=22"
   },
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
-    "start": "next start",
-    "lint": "next lint"
-  },
+  "dev": "next dev",
+  "build": "next build",
+  "start": "next start",
+  "lint": "next lint"
+}
   "dependencies": {
     "@supabase/supabase-js": "^2.56.0",
     "next": "15.5.0",
