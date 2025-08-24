@@ -2,15 +2,12 @@
   "name": "packup",
   "version": "0.1.0",
   "private": true,
-  "engines": {
-    "node": ">=18 <=22"
-  },
   "scripts": {
-  "dev": "next dev",
-  "build": "next build",
-  "start": "next start",
-  "lint": "next lint"
-}
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.56.0",
     "next": "15.5.0",
@@ -20,11 +17,10 @@
     "uuid": "^11.1.0",
     "zod": "^3.25.76"
   },
+  "engines": {
+    "node": ">=18 <=22"
+  },
   "devDependencies": {
-    "@types/node": "^20.11.30",
-    "@types/react": "^19.0.0",
-    "eslint": "^8.57.0",
-    "eslint-config-next": "15.5.0",
-    "typescript": "^5.5.4"
+    "typescript": "5.9.2"
   }
 }
