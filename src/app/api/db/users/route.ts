@@ -1,0 +1,36 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient } from '@supabase/supabase-js';
+
+export const runtime = 'nodejs';
+
+const url = process.env.NEXT_PUBLIC_SUPABASE_URL!;
+const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+
+export async function GET() {
+  return NextResponse.json({ ok: true, source: 'live', info: 'users route deployed' });
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    const jwt = req.headers.get('authorization')?.split('Bearer ')[1];
+    if (!jwt) return NextResponse.json({ ok:false, source:'live', error:'Unauthorized' }, { status: 401 });
+
+    const sb = createClient(url, anon, { global: { headers: { Authorization: `Bearer ${jwt}` } } });
+    const { data: { user } } = await sb.auth.getUser();
+    if (!user) return NextResponse.json({ ok:false, source:'live', error:'Unauthorized' }, { status: 401 });
+
+    const body = await req.json().catch(() => ({} as any));
+    const display_name = body?.display_name ?? null;
+
+    const { data, error } = await sb
+      .from('users')
+      .upsert({ id: user.id, email: user.email ?? null, display_name })
+      .select()
+      .maybeSingle();
+    if (error) throw error;
+
+    return NextResponse.json({ ok: true, source: 'live', data });
+  } catch (e:any) {
+    return NextResponse.json({ ok:false, source:'live', error: String(e?.message ?? e) }, { status: 500 });
+  }
+}
