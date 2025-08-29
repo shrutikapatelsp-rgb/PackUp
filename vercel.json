@@ -1,12 +1,7 @@
 {
-  // Run all serverless functions in Mumbai (bom1)
   "regions": ["bom1"],
-
-  // Make sure every App Router API route uses bom1 too
   "functions": {
     "app/api/**/route.js": { "regions": ["bom1"] },
     "app/api/**/route.ts": { "regions": ["bom1"] }
   }
-
-  // If you later add scheduled jobs, you'll add a "crons": [] section here.
 }
