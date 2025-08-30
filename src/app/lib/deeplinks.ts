@@ -5,7 +5,7 @@ import { makeClickId } from './pseudo';
  * Always prepends the correct static domain and appends marker + click_id.
  */
 export function normalizeDeepLink(
-  oLink: string,
+  oLink: string | undefined,
   userId: string,
   provider: 'flights' | 'hotels' | 'activities',
   ctx: Record<string, any> = {}
@@ -18,10 +18,12 @@ export function normalizeDeepLink(
   } else if (provider === 'hotels') {
     base = 'https://search.hotellook.com';
   } else if (provider === 'activities') {
-    base = 'https://travelpayouts.com/activities'; // TODO: replace with Viator/GYG later
+    base = 'https://travelpayouts.com/activities';
   }
 
-  const separator = oLink.includes('?') ? '&' : '?';
-  return `${base}${oLink}${separator}marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
-}
+  // 🔹 If oLink missing, build a default /search path
+  const path = oLink || `/search/${ctx.o}${ctx.depart}${ctx.d}1`;
 
+  const separator = path.includes('?') ? '&' : '?';
+  return `${base}${path}${separator}marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
+}
