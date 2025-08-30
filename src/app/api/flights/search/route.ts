@@ -63,30 +63,30 @@ export async function GET(req: NextRequest) {
     const data = await apiRes.json();
 
     // 🔹 Map results into PackUp's offer format
-    const offers = (data?.data || []).map((o: any) => {
-      const full_link = buildAviasalesDeepLink({
-        base: 'https://search.aviasales.com/flights',
-        marker: process.env.TRAVELPAYOUTS_MARKER!,
-        origin,
-        destination,
-        depart,
-        ret,
-        adults: 1,
-        userId
-      });
+const offers = (data?.data || []).map((o: any) => {
+  const full_link = buildAviasalesDeepLink({
+    base: 'https://search.aviasales.com/flights',
+    marker: process.env.TRAVELPAYOUTS_MARKER!,
+    origin: o.origin,
+    destination: o.destination,
+    depart: o.depart_date,
+    ret: o.return_date,
+    adults: 1,
+    userId
+  });
 
-      return {
-        provider: 'Travelpayouts',
-        from: o.origin,
-        to: o.destination,
-        depart_at: o.depart_date,
-        return_at: o.return_date,
-        price: o.value,
-        currency: o.currency,
-        airline: o.airline,
-        deep_link: full_link
-      };
-    });
+  return {
+    provider: 'Travelpayouts',
+    from: o.origin,
+    to: o.destination,
+    depart_at: o.depart_date,
+    return_at: o.return_date,
+    price: o.value,
+    currency: o.currency,
+    airline: o.airline,
+    deep_link: full_link   // ✅ we enforce our own link
+  };
+});
 
     return NextResponse.json({ ok: true, source: 'live', offers });
   } catch (e: any) {
@@ -96,4 +96,3 @@ export async function GET(req: NextRequest) {
     );
   }
 }
-
