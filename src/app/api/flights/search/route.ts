@@ -13,34 +13,72 @@ export async function GET(req: NextRequest) {
   const userId = searchParams.get('userId') || 'anon';
 
   try {
-    const deep_link = buildAviasalesDeepLink({
-      base: 'https://aviasales.tpm.lv/8D5ZUDEn', // your Travelpayouts deeplink
-      marker: process.env.TRAVELPAYOUTS_MARKER!,
-      origin,
-      destination,
-      depart,
-      ret,
-      adults: 1,
-      userId
+    if (process.env.TRAVELPAYOUTS_USE_MOCK === '1') {
+      return NextResponse.json({
+        ok: true,
+        source: 'mock',
+        offers: [
+          {
+            provider: 'Travelpayouts',
+            from: origin,
+            to: destination,
+            depart_at: '2025-09-01T09:00:00Z',
+            return_at: '2025-09-11T18:00:00Z',
+            price: 5999,
+            currency: 'INR',
+            airline: 'MockAir',
+            deep_link: 'https://aviasales.com/redirect/mock'
+          }
+        ]
+      });
+    }
+
+    // --- LIVE API CALL ---
+    const apiRes = await fetch(
+      `https://api.travelpayouts.com/v2/prices/latest?origin=${origin}&destination=${destination}&depart_date=${depart}&currency=INR&limit=5`,
+      {
+        headers: {
+          'X-Access-Token': process.env.TRAVELPAYOUTS_TOKEN!,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    if (!apiRes.ok) {
+      throw new Error(`TP API error ${apiRes.status}`);
+    }
+
+    const data = await apiRes.json();
+
+    // Map results into offers[]
+    const offers = (data?.data || []).map((o: any) => {
+      const deep_link = buildAviasalesDeepLink({
+        base: 'https://aviasales.tpm.lv/8D5ZUDEn',
+        marker: process.env.TRAVELPAYOUTS_MARKER!,
+        origin,
+        destination,
+        depart,
+        ret,
+        adults: 1,
+        userId
+      });
+
+      return {
+        provider: 'Travelpayouts',
+        from: o.origin,
+        to: o.destination,
+        depart_at: o.depart_date,
+        return_at: o.return_date,
+        price: o.value,
+        currency: o.currency,
+        airline: o.airline,
+        deep_link
+      };
     });
 
-    return NextResponse.json({
-      ok: true,
-      source: 'live',
-      offers: [
-        {
-          provider: 'aviasales',
-          price: 5000,          // placeholder, replace with API call later
-          currency: 'INR',
-          deep_link
-        }
-      ]
-    });
+    return NextResponse.json({ ok: true, source: 'live', offers });
   } catch (e: any) {
-    return NextResponse.json(
-      { ok: false, source: 'live', error: String(e?.message ?? e) },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, source: 'error', offers: [], error: String(e?.message ?? e) }, { status: 500 });
   }
 }
 
