@@ -22,7 +22,9 @@ export function normalizeDeepLink(
   }
 
   // 🔹 If oLink missing, build a default /search path
-  const path = oLink || `/search/${ctx.o}${ctx.depart}${ctx.d}1`;
+  const path =
+  oLink ||
+  `/flights?origin=${ctx.o}&destination=${ctx.d}&depart_date=${ctx.depart}&adults=1`;
 
   const separator = path.includes('?') ? '&' : '?';
   return `${base}${path}${separator}marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
