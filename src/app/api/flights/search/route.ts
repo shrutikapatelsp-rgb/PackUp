@@ -52,7 +52,8 @@ export async function GET(req: NextRequest) {
     const offers = (data?.data || []).map((o: any) => {
   // build full affiliate link
   const clickId = makeClickId(userId, { o: origin, d: destination, depart, ret });
-  const full_link = `https://search.aviasales.com${o.link}&marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
+  const separator = o.link.includes('?') ? '&' : '?';
+const full_link = `https://search.aviasales.com${o.link}${separator}marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
 
   return {
     provider: 'Travelpayouts',
