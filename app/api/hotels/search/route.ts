@@ -1,7 +1,10 @@
+console.log("HOTELS_USE_MOCK =", process.env.HOTELS_USE_MOCK);
+console.log("ACTIVITIES_USE_MOCK =", process.env.ACTIVITIES_USE_MOCK);
+
 import { NextRequest, NextResponse } from 'next/server';
 import crypto from 'crypto';
 
-const HOTELS_USE_MOCK = process.env.HOTELS_USE_MOCK === '0';
+const USE_MOCK = process.env.TRAVELPAYOUTS_USE_MOCK === '1';
 const MARKER = process.env.TRAVELPAYOUTS_MARKER!;
 
 function makeClickId(userId: string, payload: any) {
@@ -20,24 +23,24 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, source: 'error', offers: [], error: 'Missing params' });
     }
 
-    if (HOTELS_USE_MOCK) {
-      return NextResponse.json({
-        ok: true,
-        source: 'mock',
-        offers: [
-          {
-            provider: 'Travelpayouts Hotels',
-            city,
-            check_in: checkIn,
-            check_out: checkOut,
-            hotel_name: 'Mock Palace',
-            price: 4500,
-            currency: 'INR',
-            deep_link: `https://search.hotellook.com/search/${city}?marker=${MARKER}&click_id=${makeClickId(userId, { city, checkIn, checkOut })}`
-          }
-        ]
-      });
-    }
+if (USE_MOCK) {
+  return NextResponse.json({
+    ok: true,
+    source: "mock",
+    offers: [
+      {
+        provider: "Travelpayouts Hotels",
+        city,
+        check_in: checkIn,
+        check_out: checkOut,
+        hotel_name: "Mock Palace",
+        price: 4500,
+        currency: "INR",
+        deep_link: `https://search.hotellook.com/search/${city}?marker=${MARKER}&click_id=${makeClickId(userId, { city, checkIn, checkOut })}`
+      }
+    ]
+  });
+}
 
     // 🔥 Live Hotellook API
     const apiUrl = `https://engine.hotellook.com/api/v2/cache.json?city=${encodeURIComponent(city)}&checkIn=${checkIn}&checkOut=${checkOut}&limit=5&currency=inr&token=${process.env.TRAVELPAYOUTS_TOKEN}`;
