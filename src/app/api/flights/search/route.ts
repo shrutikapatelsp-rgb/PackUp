@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { buildAviasalesDeepLink } from '@/src/app/lib/deeplinks';
+import { makeClickId } from '@/src/app/lib/pseudo';
 
 export const runtime = 'nodejs';
 
@@ -33,7 +33,6 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // --- LIVE API CALL ---
     const apiRes = await fetch(
       `https://api.travelpayouts.com/v2/prices/latest?origin=${origin}&destination=${destination}&depart_date=${depart}&currency=INR&limit=5`,
       {
@@ -50,18 +49,10 @@ export async function GET(req: NextRequest) {
 
     const data = await apiRes.json();
 
-    // Map results into offers[]
     const offers = (data?.data || []).map((o: any) => {
-      const deep_link = buildAviasalesDeepLink({
-        base: 'https://aviasales.tpm.lv/8D5ZUDEn',
-        marker: process.env.TRAVELPAYOUTS_MARKER!,
-        origin,
-        destination,
-        depart,
-        ret,
-        adults: 1,
-        userId
-      });
+      // build full affiliate link
+      const clickId = makeClickId(userId, { o: origin, d: destination, depart, ret });
+      const full_link = `https://search.aviasales.com${o.link}&marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
 
       return {
         provider: 'Travelpayouts',
@@ -72,13 +63,16 @@ export async function GET(req: NextRequest) {
         price: o.value,
         currency: o.currency,
         airline: o.airline,
-        deep_link
+        deep_link: full_link
       };
     });
 
     return NextResponse.json({ ok: true, source: 'live', offers });
   } catch (e: any) {
-    return NextResponse.json({ ok: false, source: 'error', offers: [], error: String(e?.message ?? e) }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, source: 'error', offers: [], error: String(e?.message ?? e) },
+      { status: 500 }
+    );
   }
 }
 
