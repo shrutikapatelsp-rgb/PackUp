@@ -1,21 +1,27 @@
 import { makeClickId } from './pseudo';
 
-export function buildAviasalesDeepLink(opts: {
-  base: string; marker: string;
-  origin: string; destination: string;
-  depart: string; ret?: string;
-  adults?: number; userId?: string;
-}) {
-  const url = new URL(opts.base);
-  url.searchParams.set('marker', opts.marker);
-  url.searchParams.set('origin', opts.origin);
-  url.searchParams.set('destination', opts.destination);
-  url.searchParams.set('depart_date', opts.depart);
-  if (opts.ret) url.searchParams.set('return_date', opts.ret);
-  url.searchParams.set('adults', String(opts.adults ?? 1));
-  const clickId = makeClickId(opts.userId ?? 'anon', {
-    o: opts.origin, d: opts.destination, depart: opts.depart, ret: opts.ret,
-  });
-  url.searchParams.set('click_id', clickId);
-  return url.toString();
+/**
+ * Normalize Travelpayouts deeplinks into full affiliate URLs.
+ * Always prepends the correct static domain and appends marker + click_id.
+ */
+export function normalizeDeepLink(
+  oLink: string,
+  userId: string,
+  provider: 'flights' | 'hotels' | 'activities',
+  ctx: Record<string, any> = {}
+) {
+  const clickId = makeClickId(userId, ctx);
+
+  let base = '';
+  if (provider === 'flights') {
+    base = 'https://search.aviasales.com';
+  } else if (provider === 'hotels') {
+    base = 'https://search.hotellook.com';
+  } else if (provider === 'activities') {
+    base = 'https://travelpayouts.com/activities'; // TODO: replace with Viator/GYG later
+  }
+
+  const separator = oLink.includes('?') ? '&' : '?';
+  return `${base}${oLink}${separator}marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
 }
+

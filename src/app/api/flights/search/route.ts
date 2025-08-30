@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { buildAviasalesDeepLink } from '@/src/app/lib/deeplinks';
+import { normalizeDeepLink } from '@/src/app/lib/deeplinks';
 
 export const runtime = 'nodejs';
 
@@ -63,30 +64,27 @@ export async function GET(req: NextRequest) {
     const data = await apiRes.json();
 
     // 🔹 Map into offers (IGNORE o.link completely)
-    const offers = (data?.data || []).map((o: any) => {
-      const full_link = buildAviasalesDeepLink({
-        base: 'https://search.aviasales.com/flights',
-        marker: process.env.TRAVELPAYOUTS_MARKER!,
-        origin: o.origin,
-        destination: o.destination,
-        depart: o.depart_date,
-        ret: o.return_date,
-        adults: 1,
-        userId
-      });
 
-      return {
-        provider: 'Travelpayouts',
-        from: o.origin,
-        to: o.destination,
-        depart_at: o.depart_date,
-        return_at: o.return_date,
-        price: o.value,
-        currency: o.currency,
-        airline: o.airline,
-        deep_link: full_link // ✅ ALWAYS our generated link
-      };
-    });
+const offers = (data?.data || []).map((o: any) => {
+  const full_link = normalizeDeepLink(
+    o.link,          // relative path from TP API
+    userId,          // current user
+    'flights',       // provider type
+    { o: origin, d: destination, depart, ret } // context
+  );
+
+  return {
+    provider: 'Travelpayouts',
+    from: o.origin,
+    to: o.destination,
+    depart_at: o.depart_date,
+    return_at: o.return_date,
+    price: o.value,
+    currency: o.currency,
+    airline: o.airline,
+    deep_link: full_link   // ✅ always prefixed with https://search.aviasales.com
+  };
+});
 
     return NextResponse.json({ ok: true, source: 'live', offers });
   } catch (e: any) {
