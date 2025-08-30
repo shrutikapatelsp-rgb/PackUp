@@ -50,22 +50,22 @@ export async function GET(req: NextRequest) {
     const data = await apiRes.json();
 
     const offers = (data?.data || []).map((o: any) => {
-      // build full affiliate link
-      const clickId = makeClickId(userId, { o: origin, d: destination, depart, ret });
-      const full_link = `https://search.aviasales.com${o.link}&marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
+  // build full affiliate link
+  const clickId = makeClickId(userId, { o: origin, d: destination, depart, ret });
+  const full_link = `https://search.aviasales.com${o.link}&marker=${process.env.TRAVELPAYOUTS_MARKER!}&click_id=${clickId}`;
 
-      return {
-        provider: 'Travelpayouts',
-        from: o.origin,
-        to: o.destination,
-        depart_at: o.depart_date,
-        return_at: o.return_date,
-        price: o.value,
-        currency: o.currency,
-        airline: o.airline,
-        deep_link: full_link
-      };
-    });
+  return {
+    provider: 'Travelpayouts',
+    from: o.origin,
+    to: o.destination,
+    depart_at: o.depart_date,
+    return_at: o.return_date,
+    price: o.value,
+    currency: o.currency,
+    airline: o.airline,
+    deep_link: full_link
+  };
+});
 
     return NextResponse.json({ ok: true, source: 'live', offers });
   } catch (e: any) {
