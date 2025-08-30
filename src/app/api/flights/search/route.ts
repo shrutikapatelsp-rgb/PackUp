@@ -8,7 +8,7 @@ export async function GET(req: NextRequest) {
 
   const origin = searchParams.get('origin') || 'DEL';
   const destination = searchParams.get('destination') || 'BOM';
-  const depart = searchParams.get('depart') || '2025-09-10';
+  const depart = searchParams.get('depart_date') || '2025-09-10';
   const ret = searchParams.get('ret') || '';
   const userId = searchParams.get('userId') || 'anon';
 
