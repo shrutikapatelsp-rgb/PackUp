@@ -12,12 +12,23 @@ export async function GET(req: Request) {
     }
 
     const token = process.env.HOTELLOOK_TOKEN!;
-    const url = `https://engine.hotellook.com/api/v2/cache.json?location=${encodeURIComponent(
-      city
-    )}&currency=in&checkIn=${checkIn}&checkOut=${checkOut}&limit=10&token=${token}`;
 
-    const res = await fetch(url);
-    const data = await res.json();
+    // Step 1: Resolve city → locationId
+    const lookupUrl = `https://engine.hotellook.com/api/v2/lookup.json?query=${encodeURIComponent(
+      city
+    )}&lang=en&lookFor=city&limit=1&token=${token}`;
+
+    const lookupRes = await fetch(lookupUrl);
+    const lookupData = await lookupRes.json();
+    if (!lookupData || !lookupData.results?.locations?.length) {
+      throw new Error(`City not found: ${city}`);
+    }
+    const locationId = lookupData.results.locations[0].id;
+
+    // Step 2: Call Hotels cache API
+    const url = `https://engine.hotellook.com/api/v2/cache.json?locationId=${locationId}&currency=in&checkIn=${checkIn}&checkOut=${checkOut}&limit=10&token=${token}`;
+    const r = await fetch(url);
+    const data = await r.json();
 
     if (!Array.isArray(data)) {
       return NextResponse.json({ ok: false, source: "live", error: "Hotels API error", raw: data });
