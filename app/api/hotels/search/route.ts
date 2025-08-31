@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import crypto from "crypto";
 import { makeClickId } from "@/src/app/lib/pseudo";
 
 const MARKER = process.env.TRAVELPAYOUTS_MARKER || "";
@@ -37,7 +36,9 @@ export async function GET(req: NextRequest) {
             hotel_name: "Mock Palace",
             price: 4500,
             currency: "INR",
-            deep_link: `https://search.hotellook.com/search/${city}?marker=${MARKER}&click_id=${makeClickId(userId, {
+            deep_link: `https://search.hotellook.com/search/${encodeURIComponent(
+              city
+            )}?marker=${MARKER}&click_id=${makeClickId(userId, {
               city,
               checkIn,
               checkOut,
@@ -47,20 +48,48 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    // 🔥 Live API call to Hotellook
-    const url = `https://engine.hotellook.com/api/v2/cache.json?city=${encodeURIComponent(
+    // Step 1: Start search
+    const startUrl = `https://engine.hotellook.com/api/v2/search/start.json?location=${encodeURIComponent(
       city
-    )}&checkIn=${checkIn}&checkOut=${checkOut}&currency=inr&limit=5&token=${TOKEN}`;
+    )}&checkIn=${checkIn}&checkOut=${checkOut}&adultsCount=1&currency=inr&marker=${MARKER}&token=${TOKEN}`;
 
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`Travelpayouts Hotels API error: ${res.status}`);
+    const startRes = await fetch(startUrl);
+    if (!startRes.ok) {
+      throw new Error(`Hotels start API error: ${startRes.status}`);
     }
 
-    const json = await res.json();
+    const startJson = await startRes.json();
+    const searchId = startJson?.searchId;
+    if (!searchId) {
+      throw new Error("No searchId returned from hotels API");
+    }
 
-    // Normalize response
-    const offers = (json || []).map((h: any) => ({
+    // Step 2: Poll getResult (basic, 3 tries max)
+    let results: any[] = [];
+    for (let i = 0; i < 3; i++) {
+      await new Promise((r) => setTimeout(r, 1500)); // wait 1.5s before poll
+
+      const resultUrl = `https://engine.hotellook.com/api/v2/search/getResult.json?searchId=${searchId}&limit=5&token=${TOKEN}`;
+      const resultRes = await fetch(resultUrl);
+      if (!resultRes.ok) continue;
+
+      const resultJson = await resultRes.json();
+      if (Array.isArray(resultJson)) {
+        results = resultJson;
+        break;
+      }
+    }
+
+    if (!results.length) {
+      return NextResponse.json({
+        ok: true,
+        source: "live",
+        offers: [],
+      });
+    }
+
+    // Normalize results
+    const offers = results.map((h: any) => ({
       provider: "Travelpayouts Hotels",
       city,
       check_in: checkIn,
