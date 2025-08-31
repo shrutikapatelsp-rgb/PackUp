@@ -1,55 +1,44 @@
-import { NextResponse } from "next/server";
+import { NextResponse } from 'next/server';
+import crypto from 'crypto';
 
 export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
-    const city = searchParams.get("city");
-    const checkIn = searchParams.get("check_in");
-    const checkOut = searchParams.get("check_out");
+    const city = searchParams.get('city');
+    const checkIn = searchParams.get('check_in');
+    const checkOut = searchParams.get('check_out');
+    const userId = searchParams.get('userId') ?? 'anon';
 
     if (!city || !checkIn || !checkOut) {
-      return NextResponse.json({ ok: false, error: "Missing params" });
+      return NextResponse.json({ ok: false, source: 'error', error: 'Missing required params: city, check_in, check_out' }, { status: 400 });
     }
 
-    const token = process.env.HOTELLOOK_TOKEN!;
+    // Build click_id
+    const clickId = crypto.createHash('md5').update(`${userId}-${city}-${checkIn}-${checkOut}`).digest('hex');
 
-    // Step 1: Resolve city → locationId
-    const lookupUrl = `https://engine.hotellook.com/api/v2/lookup.json?query=${encodeURIComponent(
-      city
-    )}&lang=en&lookFor=city&limit=1&token=${token}`;
+    // Call Hotellook API
+    const url = `https://engine.hotellook.com/api/v2/cache.json?location=${encodeURIComponent(city)}&checkIn=${checkIn}&checkOut=${checkOut}&currency=inr&limit=5&partner_id=${process.env.TRAVELPAYOUTS_MARKER}`;
 
-    const lookupRes = await fetch(lookupUrl);
-    const lookupData = await lookupRes.json();
-    if (!lookupData || !lookupData.results?.locations?.length) {
-      throw new Error(`City not found: ${city}`);
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      return NextResponse.json({ ok: false, source: 'live', error: 'Hotels API error', raw: await resp.json() }, { status: resp.status });
     }
-    const locationId = lookupData.results.locations[0].id;
+    const data = await resp.json();
 
-    // Step 2: Call Hotels cache API
-    const url = `https://engine.hotellook.com/api/v2/cache.json?locationId=${locationId}&currency=in&checkIn=${checkIn}&checkOut=${checkOut}&limit=10&token=${token}`;
-    const r = await fetch(url);
-    const data = await r.json();
-
-    if (!Array.isArray(data)) {
-      return NextResponse.json({ ok: false, source: "live", error: "Hotels API error", raw: data });
-    }
-
-    const offers = data.map((o: any) => ({
-      provider: "Travelpayouts Hotels",
+    const offers = (data || []).map((o: any) => ({
+      provider: 'Travelpayouts Hotels',
       city,
       check_in: checkIn,
       check_out: checkOut,
       hotel_name: o.hotelName,
       price: o.priceFrom,
-      currency: "INR",
-      deep_link: `https://search.hotellook.com/search/${encodeURIComponent(
-        city
-      )}?marker=${process.env.TRAVELPAYOUTS_MARKER}&click_id=test123`,
+      currency: 'INR',
+      deep_link: `https://search.hotellook.com/hotels?location=${encodeURIComponent(city)}&checkIn=${checkIn}&checkOut=${checkOut}&adults=1&marker=${process.env.TRAVELPAYOUTS_MARKER}&click_id=${clickId}`
     }));
 
-    return NextResponse.json({ ok: true, source: "live", offers });
-  } catch (e: any) {
-    return NextResponse.json({ ok: false, source: "error", error: e.message });
+    return NextResponse.json({ ok: true, source: 'live', offers });
+  } catch (err: any) {
+    return NextResponse.json({ ok: false, source: 'error', error: err.message });
   }
 }
 
