@@ -12,7 +12,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: false, source: 'error', offers: [], error: 'Missing params' }, { status: 400 });
     }
 
-    const token = process.env.TRAVELPAYOUTS_TOKEN!;
+    const token = process.env.HOTELLOOK_TOKEN!;
     const marker = process.env.TRAVELPAYOUTS_MARKER!;
 
     const url = `https://engine.hotellook.com/api/v2/cache.json?location=${encodeURIComponent(
