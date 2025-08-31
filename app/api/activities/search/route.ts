@@ -1,72 +1,40 @@
-import { NextRequest, NextResponse } from "next/server";
-import { makeClickId } from "@/src/app/lib/pseudo";
-
-const MARKER = process.env.TRAVELPAYOUTS_MARKER || "";
-const TOKEN = process.env.TRAVELPAYOUTS_TOKEN || "";
-const USE_MOCK = process.env.TRAVELPAYOUTS_USE_MOCK === "1";
+import { NextRequest, NextResponse } from 'next/server';
 
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const city = searchParams.get("city");
-    const date = searchParams.get("date");
-    const userId = searchParams.get("userId") || "anon";
+    const city = searchParams.get('city');
+    const date = searchParams.get('date');
+    const userId = searchParams.get('userId') ?? 'anon';
 
     if (!city || !date) {
-      return NextResponse.json({
-        ok: false,
-        source: "error",
-        offers: [],
-        error: "Missing required params: city, date",
-      });
+      return NextResponse.json({ ok: false, source: 'error', offers: [], error: 'Missing params' }, { status: 400 });
     }
 
-    // Mock branch
-    if (USE_MOCK) {
-      return NextResponse.json({
-        ok: true,
-        source: "mock",
-        offers: [
-          {
-            provider: "Travelpayouts Activities",
-            city,
-            date,
-            activity_name: "Mock City Tour",
-            price: 1200,
-            currency: "INR",
-            deep_link: `https://travelpayouts.com/activities/search/${encodeURIComponent(
-              city
-            )}?marker=${MARKER}&click_id=${makeClickId(userId, { city, date })}`,
-          },
-        ],
-      });
-    }
+    const marker = process.env.TRAVELPAYOUTS_MARKER!;
 
-    // 🔥 Live Activities API (Viator via Travelpayouts)
-    const url = `https://activities-api.travelpayouts.com/v2/prices.json?city=${encodeURIComponent(
-      city
-    )}&date=${date}&currency=inr&marker=${MARKER}&token=${TOKEN}`;
+    // Travelpayouts Activities endpoint (demo implementation, replace with live API once docs available)
+    const url = `https://travelpayouts.com/api/activities?city=${encodeURIComponent(city)}&date=${date}&marker=${marker}`;
 
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Activities API error: ${res.status}`);
-    const json = await res.json();
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`Activities API error: ${r.status}`);
+    const data = await r.json();
 
-    const results = Array.isArray(json?.data) ? json.data : [];
+    const offers = (data.activities || []).map((a: any) => {
+      return {
+        provider: 'Travelpayouts Activities',
+        city,
+        date,
+        activity_name: a.name,
+        price: a.price,
+        currency: a.currency || 'INR',
+        deep_link: `https://travelpayouts.com/activities/search/${encodeURIComponent(city)}?marker=${marker}&click_id=${userId}`,
+      };
+    });
 
-    const offers = results.slice(0, 5).map((a: any) => ({
-      provider: "Travelpayouts Activities",
-      city,
-      date,
-      activity_name: a.title || a.activity_name || "Unknown Activity",
-      price: a.price?.amount || 0,
-      currency: a.price?.currency || "INR",
-      deep_link: `${a.url}?marker=${MARKER}&click_id=${makeClickId(userId, { city, date })}`,
-    }));
-
-    return NextResponse.json({ ok: true, source: "live", offers });
+    return NextResponse.json({ ok: true, source: 'live', offers });
   } catch (err: any) {
-    console.error("Activities API error:", err);
-    return NextResponse.json({ ok: false, source: "error", offers: [], error: err.message });
+    return NextResponse.json({ ok: false, source: 'error', offers: [], error: err.message }, { status: 500 });
   }
 }
 
