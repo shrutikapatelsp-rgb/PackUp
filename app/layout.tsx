@@ -1,3 +1,4 @@
+import ClientSupabaseBootstrap from './components/ClientSupabaseBootstrap';
 import './globals.css';
 import type { Metadata } from "next";
 import "./globals.css";
@@ -34,7 +35,7 @@ return (
       />
     </head>
     <body>
-      {/* Expose supabase client in browser console */}
+      {/* Make supabase available in the browser console */}
       <ClientSupabaseBootstrap />
       {children}
     </body>
