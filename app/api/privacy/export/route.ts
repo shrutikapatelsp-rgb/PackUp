@@ -14,7 +14,7 @@
  * }
  */
 import { NextResponse } from 'next/server';
-import { getSupabaseServerClient } from '@/app/lib/supabaseServer';
+import { getSupabaseServerClient } from '../../../lib/supabaseServer';
 
 export async function GET(req: Request) {
   try {
