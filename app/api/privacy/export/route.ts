@@ -2,39 +2,58 @@
  * app/api/privacy/export/route.ts
  * Exports PII-scoped rows for the authenticated user.
  *
- * Returns:
- * {
- *   ok: true,
- *   source: 'live',
- *   user: {...} | null,
- *   trips: [...],
- *   orders: [...],
- *   order_items: [...],
- *   cart_items: [...]
- * }
+ * Uses the Bearer token from the request to validate the user (via supabase auth.getUser).
+ * Uses the public anon key to call the DB; RLS policies must enforce user-scoped reads.
+ *
+ * Returned shape:
+ * { ok:true, source:'live', user, trips, orders, order_items, cart_items }
  */
-import { NextResponse } from 'next/server';
-import { getSupabaseServerClient } from '../../../lib/supabaseServer';
+import { NextRequest, NextResponse } from 'next/server';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
 
-export async function GET(req: Request) {
+const URL = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
+const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
+
+function getBearer(req: NextRequest): string | null {
+  const raw = req.headers.get('authorization') || '';
+  const m = raw.match(/^Bearer\s+(.+)$/i);
+  return m?.[1] ?? null;
+}
+
+function getSupabaseWithJwt(jwt: string): SupabaseClient {
+  // create a transient client that forwards the user's JWT so RLS restricts reads
+  return createClient(URL, ANON, {
+    global: {
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+      },
+    },
+  });
+}
+
+export async function GET(req: NextRequest) {
   try {
-    const auth = req.headers.get('authorization') || '';
-    if (!auth.startsWith('Bearer ')) {
-      return NextResponse.json({ ok: false, error: 'Missing Authorization bearer token' }, { status: 401 });
+    const jwt = getBearer(req);
+    if (!jwt) {
+      return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
     }
-    const token = auth.slice('Bearer '.length);
 
-    const sb = getSupabaseServerClient();
+    if (!URL || !ANON) {
+      console.error('[privacy/export] missing env NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY');
+      return NextResponse.json({ ok: false, source: 'live', error: 'Server misconfiguration' }, { status: 500 });
+    }
+
+    const sb = getSupabaseWithJwt(jwt);
 
     // Validate token -> user
-    const { data: authData, error: authErr } = await sb.auth.getUser(token);
+    const { data: authData, error: authErr } = await sb.auth.getUser();
     if (authErr || !authData?.user) {
-      return NextResponse.json({ ok: false, error: 'Invalid token or user not found' }, { status: 401 });
+      return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
     }
     const user = authData.user;
     const uid = user.id;
 
-    // Fetch user-scoped data in parallel
+    // Fetch user-scoped data in parallel (RLS should ensure only user's rows are returned)
     const [
       uRes,
       tripsRes,
@@ -64,8 +83,8 @@ export async function GET(req: Request) {
       order_items,
       cart_items,
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error('[privacy/export] error', err);
-    return NextResponse.json({ ok: false, error: 'server_error' }, { status: 500 });
+    return NextResponse.json({ ok: false, source: 'error', error: err?.message ?? 'Server error' }, { status: 500 });
   }
 }
