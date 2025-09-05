@@ -1,4 +1,3 @@
-cat > app/api/privacy/delete/route.ts <<'TS'
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
@@ -23,8 +22,7 @@ export const DELETE = async (req: NextRequest) => {
     const sb = createClient(URL, ANON, {
       global: { headers: { Authorization: `Bearer ${jwt}` } },
     });
-
-    // get user
+ // get user
     const { data: authData, error: authErr } = await sb.auth.getUser();
     const user = authData?.user;
     if (authErr || !user) {
@@ -114,5 +112,3 @@ export const DELETE = async (req: NextRequest) => {
 
 // Accept POST (some clients prefer POST for form submissions)
 export const POST = DELETE;
-TS
-
