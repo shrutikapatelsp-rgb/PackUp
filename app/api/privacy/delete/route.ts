@@ -1,3 +1,4 @@
+/* app/api/privacy/delete/route.ts */
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 
@@ -13,7 +14,9 @@ function getBearer(req: NextRequest): string | null {
 async function handleDelete(req: NextRequest) {
   try {
     const jwt = getBearer(req);
-    if (!jwt) return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
+    if (!jwt) {
+      return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
+    }
 
     const sb = createClient(URL, ANON, { global: { headers: { Authorization: `Bearer ${jwt}` } } });
 
@@ -26,35 +29,51 @@ async function handleDelete(req: NextRequest) {
     const uid = user.id;
     const counts: Record<string, number> = {};
 
+    // 1) get order ids
     const { data: ordersForUser } = await sb.from('orders').select('id').eq('user_id', uid);
     const orderIds = (ordersForUser ?? []).map((o: any) => o.id);
 
+    // 2) delete order_items if any
     if (orderIds.length) {
       const res = await sb.from('order_items').delete().in('order_id', orderIds).select('*', { count: 'exact' });
       counts.order_items = (res.count ?? 0) as number;
-    } else counts.order_items = 0;
+    } else {
+      counts.order_items = 0;
+    }
 
+    // 3) delete cart_items
     {
       const res = await sb.from('cart_items').delete().eq('user_id', uid).select('*', { count: 'exact' });
       counts.cart_items = (res.count ?? 0) as number;
     }
 
+    // 4) delete orders
     {
       const res = await sb.from('orders').delete().eq('user_id', uid).select('*', { count: 'exact' });
       counts.orders = (res.count ?? 0) as number;
     }
 
+    // 5) delete trips
     {
       const res = await sb.from('trips').delete().eq('user_id', uid).select('*', { count: 'exact' });
       counts.trips = (res.count ?? 0) as number;
     }
 
+    // 6) delete user row
     {
       const res = await sb.from('users').delete().eq('id', uid).select('*', { count: 'exact' });
       counts.users = (res.count ?? 0) as number;
     }
 
-    await sb.from('events').insert({ type: 'privacy_delete', payload: { user_id: uid, counts, at: new Date().toISOString() } }).catch(()=>{});
+    // Best-effort audit log
+    try {
+      await sb.from('events').insert({
+        type: 'privacy_delete',
+        payload: { user_id: uid, counts, at: new Date().toISOString() },
+      });
+    } catch (e) {
+      console.warn('privacy_delete log failed', e);
+    }
 
     return NextResponse.json({ ok: true, source: 'live', deleted_at: new Date().toISOString(), counts });
   } catch (err: any) {
