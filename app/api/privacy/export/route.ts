@@ -1,71 +1,71 @@
-/* app/api/privacy/export/route.ts */
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+/**
+ * app/api/privacy/export/route.ts
+ * Exports PII-scoped rows for the authenticated user.
+ *
+ * Returns:
+ * {
+ *   ok: true,
+ *   source: 'live',
+ *   user: {...} | null,
+ *   trips: [...],
+ *   orders: [...],
+ *   order_items: [...],
+ *   cart_items: [...]
+ * }
+ */
+import { NextResponse } from 'next/server';
+import { getSupabaseServerClient } from '@/app/lib/supabaseServer';
 
-const URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-function getBearer(req: NextRequest): string | null {
-  const raw = req.headers.get('authorization') || '';
-  const m = raw.match(/^Bearer\s+(.+)$/i);
-  return m?.[1] ?? null;
-}
-
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const jwt = getBearer(req);
-    if (!jwt) {
-      return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
+    const auth = req.headers.get('authorization') || '';
+    if (!auth.startsWith('Bearer ')) {
+      return NextResponse.json({ ok: false, error: 'Missing Authorization bearer token' }, { status: 401 });
     }
+    const token = auth.slice('Bearer '.length);
 
-    const sb = createClient(URL, ANON, { global: { headers: { Authorization: `Bearer ${jwt}` } } });
+    const sb = getSupabaseServerClient();
 
-    const { data: authData, error: authErr } = await sb.auth.getUser();
-    const user = authData?.user;
-    if (authErr || !user) {
-      return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
+    // Validate token -> user
+    const { data: authData, error: authErr } = await sb.auth.getUser(token);
+    if (authErr || !authData?.user) {
+      return NextResponse.json({ ok: false, error: 'Invalid token or user not found' }, { status: 401 });
     }
+    const user = authData.user;
+    const uid = user.id;
 
-    // gather data (RLS enforces user scope)
-    const [uRes, tripsRes, ordersRes, cartRes] = await Promise.all([
-      sb.from('users').select('id,email,display_name,created_at').eq('id', user.id).maybeSingle(),
-      sb.from('trips').select('*').eq('user_id', user.id),
-      sb.from('orders').select('id,total,currency,status,created_at').eq('user_id', user.id),
-      sb.from('cart_items').select('*').eq('user_id', user.id'),
+    // Fetch user-scoped data in parallel
+    const [
+      uRes,
+      tripsRes,
+      ordersRes,
+      orderItemsRes,
+      cartItemsRes
+    ] = await Promise.all([
+      sb.from('users').select('id,email,display_name,created_at').eq('id', uid).maybeSingle(),
+      sb.from('trips').select('*').eq('user_id', uid),
+      sb.from('orders').select('id,total,currency,status,created_at').eq('user_id', uid),
+      sb.from('order_items').select('*').eq('user_id', uid),
+      sb.from('cart_items').select('*').eq('user_id', uid),
     ]);
 
-    const u = uRes?.data ?? { id: user.id };
+    const userRow = uRes?.data ?? null;
     const trips = tripsRes?.data ?? [];
     const orders = ordersRes?.data ?? [];
-    const cart_items = cartRes?.data ?? [];
-
-    // fetch order_items (if any)
-    let order_items: any[] = [];
-    const orderIds = orders.map((o: any) => o.id);
-    if (orderIds.length) {
-      const { data } = await sb.from('order_items').select('*').in('order_id', orderIds);
-      order_items = data ?? [];
-    }
-
-    // Best-effort audit log using try/catch (avoid .catch chain)
-    try {
-      await sb.from('events').insert({
-        type: 'privacy_export',
-        payload: { user_id: user.id, at: new Date().toISOString() },
-      });
-    } catch (e) {
-      // swallow logging errors intentionally
-      console.warn('privacy_export log failed', e);
-    }
+    const order_items = orderItemsRes?.data ?? [];
+    const cart_items = cartItemsRes?.data ?? [];
 
     return NextResponse.json({
       ok: true,
       source: 'live',
-      user: u,
-      exported_at: new Date().toISOString(),
-      data: { trips, orders, order_items, cart_items },
+      user: userRow,
+      trips,
+      orders,
+      order_items,
+      cart_items,
     });
-  } catch (err: any) {
-    return NextResponse.json({ ok: false, source: 'error', error: err?.message ?? 'Server error' }, { status: 500 });
+  } catch (err) {
+    console.error('[privacy/export] error', err);
+    return NextResponse.json({ ok: false, error: 'server_error' }, { status: 500 });
   }
 }
