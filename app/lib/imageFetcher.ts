@@ -260,5 +260,3 @@ export async function fetchAndStoreImage(query: string, opts: FetchOpts = {}) {
   throw err;
 }
 
-export default fetchAndStoreImage;
-TS
