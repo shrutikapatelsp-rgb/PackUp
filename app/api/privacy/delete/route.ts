@@ -1,85 +1,50 @@
-/* app/api/privacy/delete/route.ts */
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
+import { NextRequest, NextResponse } from "next/server";
+import { createClient } from "@supabase/supabase-js";
 
-const URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const ANON = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const SUPA_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
 
-function getBearer(req: NextRequest): string | null {
-  const raw = req.headers.get('authorization') || '';
+if (!SUPA_URL || !SERVICE_ROLE) throw new Error("Missing SUPABASE envs");
+
+function extractBearer(req: NextRequest) {
+  const raw = req.headers.get("authorization") || "";
   const m = raw.match(/^Bearer\s+(.+)$/i);
   return m?.[1] ?? null;
 }
 
-async function handleDelete(req: NextRequest) {
+export async function DELETE(req: NextRequest) {
+  const opId = `privacy-delete-${Date.now().toString(36)}`;
   try {
-    const jwt = getBearer(req);
-    if (!jwt) {
-      return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
-    }
+    const token = extractBearer(req);
+    if (!token) return NextResponse.json({ ok: false, code: "AUTH_INVALID", message: "No token", operationId: opId }, { status: 401 });
 
-    const sb = createClient(URL, ANON, { global: { headers: { Authorization: `Bearer ${jwt}` } } });
+    // verify user with anon client
+    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+    const sb = createClient(SUPA_URL, anon!, { global: { headers: { Authorization: `Bearer ${token}` } } });
 
-    const { data: authData, error: authErr } = await sb.auth.getUser();
-    const user = authData?.user;
-    if (authErr || !user) {
-      return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
-    }
+    const { data: userData, error: userErr } = await sb.auth.getUser();
+    if (userErr || !userData?.user) return NextResponse.json({ ok: false, code: "AUTH_INVALID", message: "User not found", operationId: opId }, { status: 401 });
 
-    const uid = user.id;
-    const counts: Record<string, number> = {};
+    const uid = userData.user.id;
 
-    // 1) get order ids
-    const { data: ordersForUser } = await sb.from('orders').select('id').eq('user_id', uid);
-    const orderIds = (ordersForUser ?? []).map((o: any) => o.id);
+    // Use service-role client to delete PII-scoped rows
+    const svc = createClient(SUPA_URL, SERVICE_ROLE);
 
-    // 2) delete order_items if any
+    // Delete order_items (by order id)
+    const orders = await svc.from("orders").select("id").eq("user_id", uid);
+    const orderIds = (orders.data || []).map((r: any) => r.id);
     if (orderIds.length) {
-      const res = await sb.from('order_items').delete().in('order_id', orderIds).select('*', { count: 'exact' });
-      counts.order_items = (res.count ?? 0) as number;
-    } else {
-      counts.order_items = 0;
+      await svc.from("order_items").delete().in("order_id", orderIds).select("*");
     }
 
-    // 3) delete cart_items
-    {
-      const res = await sb.from('cart_items').delete().eq('user_id', uid).select('*', { count: 'exact' });
-      counts.cart_items = (res.count ?? 0) as number;
-    }
+    // delete cart items, orders, trips, users
+    await svc.from("cart_items").delete().eq("user_id", uid).select("*");
+    await svc.from("orders").delete().eq("user_id", uid).select("*");
+    await svc.from("trips").delete().eq("user_id", uid).select("*");
+    await svc.from("users").delete().eq("id", uid).select("*");
 
-    // 4) delete orders
-    {
-      const res = await sb.from('orders').delete().eq('user_id', uid).select('*', { count: 'exact' });
-      counts.orders = (res.count ?? 0) as number;
-    }
-
-    // 5) delete trips
-    {
-      const res = await sb.from('trips').delete().eq('user_id', uid).select('*', { count: 'exact' });
-      counts.trips = (res.count ?? 0) as number;
-    }
-
-    // 6) delete user row
-    {
-      const res = await sb.from('users').delete().eq('id', uid).select('*', { count: 'exact' });
-      counts.users = (res.count ?? 0) as number;
-    }
-
-    // Best-effort audit log
-    try {
-      await sb.from('events').insert({
-        type: 'privacy_delete',
-        payload: { user_id: uid, counts, at: new Date().toISOString() },
-      });
-    } catch (e) {
-      console.warn('privacy_delete log failed', e);
-    }
-
-    return NextResponse.json({ ok: true, source: 'live', deleted_at: new Date().toISOString(), counts });
+    return NextResponse.json({ ok: true, deleted: { user: uid }, operationId: opId });
   } catch (err: any) {
-    return NextResponse.json({ ok: false, source: 'error', error: err?.message ?? 'Server error' }, { status: 500 });
+    return NextResponse.json({ ok: false, code: err?.code ?? "SERVER_ERROR", message: err?.message ?? "Server error", operationId: opId }, { status: 500 });
   }
 }
-
-export const DELETE = handleDelete;
-export const POST = handleDelete;
