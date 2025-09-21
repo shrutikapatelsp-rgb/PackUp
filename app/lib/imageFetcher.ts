@@ -1,273 +1,193 @@
-import fetch from "node-fetch";
-import { createClient } from "@supabase/supabase-js";
-import { URL } from "url";
-import crypto from "crypto";
+import { supabaseService } from './supabaseServer';
+import { v4 as uuidv4 } from 'uuid';
 
-type ProviderName = "unsplash" | "pexels" | "bing" | "google" | "wikimedia";
+const UNSPLASH_KEY = process.env.UNSPLASH_ACCESS_KEY;
+const PEXELS_KEY = process.env.PEXELS_API_KEY;
+const BING_KEY = process.env.BING_API_KEY;
+const BING_ENDPOINT = process.env.BING_ENDPOINT;
+const GOOGLE_KEY = process.env.GOOGLE_API_KEY;
+const GOOGLE_CX = process.env.GOOGLE_CX;
 
-export type FetchImageResult = {
-  provider: ProviderName;
-  author?: string | null;
-  license?: string | null;
+const BUCKET = process.env.SUPABASE_IMAGE_BUCKET ?? 'packup-images';
+
+// helper for timeout
+function timeoutPromise<T>(ms: number, p: Promise<T>) {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
+  ]);
+}
+
+// small helper to fetch binary and return buffer & content-type
+async function fetchBuffer(url: string, maxMs = 7000) {
+  const res = await timeoutPromise(maxMs, fetch(url));
+  if (!res.ok) throw new Error(`fetch failed ${res.status}`);
+  const arrayBuffer = await res.arrayBuffer();
+  const contentType = res.headers.get('content-type') ?? 'application/octet-stream';
+  return { buffer: Buffer.from(arrayBuffer), contentType };
+}
+
+type ImageResult = {
+  ok: true;
+  storagePath: string;
+  publicUrl: string;
+  provider: string;
   originalUrl: string;
-  url: string; // uploaded Supabase URL
-  path: string; // object path in bucket
+  author?: string;
+  license?: string;
   width?: number;
   height?: number;
-  attempts?: any[];
-  diag?: any;
 };
 
-const SUPA_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPA_SERVICE = process.env.SUPABASE_SERVICE_ROLE;
-const BUCKET = process.env.SUPABASE_IMAGE_BUCKET || "packup-images";
+type ImageFetchError = {
+  ok: false;
+  code: 'IMAGE_FETCH_FAILED' | 'NO_PROVIDERS' | 'UPLOAD_FAILED';
+  reason?: string;
+};
 
-if (!SUPA_URL || !SUPA_SERVICE) {
-  // throw at import time to avoid silent failures in production
-  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE env for imageFetcher");
-}
+export async function fetchImageAndUpload(query: string, operationId?: string): Promise<ImageResult | ImageFetchError> {
+  const attemptProviders = [];
 
-const supaSvc = createClient(SUPA_URL, SUPA_SERVICE);
+  if (UNSPLASH_KEY) attemptProviders.push('unsplash');
+  if (PEXELS_KEY) attemptProviders.push('pexels');
+  if (BING_KEY && BING_ENDPOINT) attemptProviders.push('bing');
+  if (GOOGLE_KEY && GOOGLE_CX) attemptProviders.push('google');
+  attemptProviders.push('wikimedia');
+  // If nothing configured, still try Wikimedia as it is open
 
-/** small helper to sleep */
-function sleep(ms: number) {
-  return new Promise((res) => setTimeout(res, ms));
-}
-
-/** safe fetch with timeout */
-async function timedFetch(url: string, opts: any = {}, timeoutMs = 3000) {
-  const controller = new AbortController();
-  const id = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { ...opts, signal: controller.signal });
-    clearTimeout(id);
-    return res;
-  } catch (err) {
-    clearTimeout(id);
-    throw err;
+  if (attemptProviders.length === 0) {
+    return { ok: false, code: 'NO_PROVIDERS', reason: 'No image provider keys configured' };
   }
-}
 
-/** download a url to a Buffer with retries */
-async function downloadBuffer(url: string, attempts = 2, timeoutMs = 5000) {
-  let lastErr: any = null;
-  for (let i = 0; i <= attempts; i++) {
+  // try each provider with timeouts and up to 2 retries
+  for (const p of attemptProviders) {
     try {
-      const r = await timedFetch(url, { headers: { "User-Agent": "PackUpImageFetcher/1.0" } }, timeoutMs * (1 + i));
-      if (!r.ok) throw new Error(`http ${r.status}`);
-      const buf = await r.arrayBuffer();
-      return Buffer.from(buf);
-    } catch (err: any) {
-      lastErr = err;
-      await sleep(200 * Math.pow(2, i));
-    }
-  }
-  throw lastErr;
-}
-
-/** simple filename sanitizer */
-function safeFilename(base: string) {
-  return base.replace(/[^a-zA-Z0-9_\-\.]/g, "_").slice(0, 220);
-}
-
-/** upload Buffer to Supabase Storage and return public path */
-async function uploadToSupabase(buf: Buffer, keyPrefix: string, originalUrl: string) {
-  const id = crypto.randomUUID();
-  const ext = (() => {
-    try {
-      const u = new URL(originalUrl);
-      const p = u.pathname;
-      const m = p.match(/\.(jpg|jpeg|png|webp|gif|bmp|tiff|svg)$/i);
-      return m ? m[0] : ".jpg";
-    } catch {
-      return ".jpg";
-    }
-  })();
-  const name = safeFilename(`${keyPrefix}_${id}${ext}`);
-  const path = `itineraries/${name}`;
-  const res = await supaSvc.storage.from(BUCKET).upload(path, buf, {
-    contentType: undefined,
-    upsert: false,
-  });
-
-  if (res.error) throw new Error(`upload_failed: ${res.error.message}`);
-  // Build public URL (Supabase storage public URL)
-  // Use storage/v1/object/public/<bucket>/<path>
-  const publicUrl = `${SUPA_URL.replace(/\/$/, "")}/storage/v1/object/public/${encodeURIComponent(BUCKET)}/${encodeURIComponent(path)}`;
-  return { url: publicUrl, path };
-}
-
-/** Provider implementations — return first usable candidate or null */
-/* UNSPLASH */
-async function searchUnsplash(query: string, opts: { timeoutMs: number }) {
-  const key = process.env.UNSPLASH_ACCESS_KEY;
-  if (!key) return null;
-  const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=3`;
-  const r = await timedFetch(url, { headers: { Authorization: `Client-ID ${key}` } }, opts.timeoutMs);
-  if (!r.ok) return null;
-  const j = await r.json();
-  const first = j.results?.[0];
-  if (!first) return null;
-  return {
-    provider: "unsplash" as ProviderName,
-    author: first.user?.name ?? null,
-    license: "unsplash",
-    originalUrl: first.urls?.full ?? first.urls?.raw ?? first.urls?.regular,
-  };
-}
-
-/* PEXELS */
-async function searchPexels(query: string, opts: { timeoutMs: number }) {
-  const key = process.env.PEXELS_API_KEY;
-  if (!key) return null;
-  const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=3`;
-  const r = await timedFetch(url, { headers: { Authorization: key } }, opts.timeoutMs);
-  if (!r.ok) return null;
-  const j = await r.json();
-  const first = j.photos?.[0];
-  if (!first) return null;
-  return {
-    provider: "pexels" as ProviderName,
-    author: (first.photographer as string) ?? null,
-    license: "pexels",
-    originalUrl: first.src?.original ?? first.src?.large,
-  };
-}
-
-/* BING Image Search (optional) */
-async function searchBing(query: string, opts: { timeoutMs: number }) {
-  const key = process.env.BING_API_KEY;
-  const endpoint = process.env.BING_ENDPOINT; // e.g., https://api.bing.microsoft.com/v7.0/images/search
-  if (!key || !endpoint) return null;
-  const url = `${endpoint}?q=${encodeURIComponent(query)}&count=3`;
-  const r = await timedFetch(url, { headers: { "Ocp-Apim-Subscription-Key": key } }, opts.timeoutMs);
-  if (!r.ok) return null;
-  const j = await r.json();
-  const first = j.value?.[0];
-  if (!first) return null;
-  return {
-    provider: "bing" as ProviderName,
-    author: first.hostPageDisplayUrl ?? null,
-    license: null,
-    originalUrl: first.contentUrl,
-  };
-}
-
-/* Google Custom Search (CSE) */
-async function searchGoogleCSE(query: string, opts: { timeoutMs: number }) {
-  const key = process.env.GOOGLE_API_KEY;
-  const cx = process.env.GOOGLE_CX;
-  if (!key || !cx) return null;
-  const url = `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(key)}&cx=${encodeURIComponent(cx)}&searchType=image&q=${encodeURIComponent(query)}&num=3`;
-  const r = await timedFetch(url, {}, opts.timeoutMs);
-  if (!r.ok) {
-    // Google sometimes returns 403/429; bubble up
-    const text = await r.text().catch(() => "");
-    throw new Error(`google_cse_error ${r.status} ${text}`);
-  }
-  const j = await r.json();
-  const first = j.items?.[0];
-  if (!first) return null;
-  return {
-    provider: "google" as ProviderName,
-    author: first.displayLink ?? null,
-    license: null,
-    originalUrl: first.link,
-  };
-}
-
-/* Wikimedia Commons search */
-async function searchWikimedia(query: string, opts: { timeoutMs: number }) {
-  const url = `https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=imageinfo&iiprop=url|extmetadata&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=3`;
-  const r = await timedFetch(url, {}, opts.timeoutMs);
-  if (!r.ok) return null;
-  const j = await r.json();
-  const pages = j.query?.pages;
-  if (!pages) return null;
-  const firstKey = Object.keys(pages)[0];
-  if (!firstKey) return null;
-  const imageinfo = pages[firstKey]?.imageinfo?.[0];
-  if (!imageinfo) return null;
-  return {
-    provider: "wikimedia" as ProviderName,
-    author: imageinfo?.user ?? null,
-    license: imageinfo?.extmetadata?.LicenseShortName?.value ?? null,
-    originalUrl: imageinfo?.url,
-  };
-}
-
-/** Main exported function:
- *  fetchAndStoreImage(query, options)
- *  options: { timeoutMs?: number, attempts?: number, operationId?: string, keyPrefix?: string }
- */
-export async function fetchAndStoreImage(query: string, options: any = {}): Promise<FetchImageResult> {
-  const op = options.operationId || `img_${Date.now().toString(36)}`;
-  const timeoutMs = options.timeoutMs ?? 3000;
-  const maxAttempts = options.attempts ?? 2;
-
-  // providers in priority order (we will attempt them, but we fetch candidates in parallel)
-  const providerFns: Array<() => Promise<any>> = [
-    () => searchUnsplash(query, { timeoutMs }),
-    () => searchPexels(query, { timeoutMs }),
-    () => searchBing(query, { timeoutMs }).catch((e) => null),
-    () => searchGoogleCSE(query, { timeoutMs }).catch((e) => null),
-    () => searchWikimedia(query, { timeoutMs }).catch((e) => null),
-  ];
-
-  const diag: any[] = [];
-
-  // we'll call each provider in sequence but allow each to retry internally.
-  for (let pi = 0; pi < providerFns.length; pi++) {
-    const pname = ["unsplash", "pexels", "bing", "google", "wikimedia"][pi] as ProviderName;
-    let providerResult: any = null;
-    let attempts: any[] = [];
-    for (let attempt = 0; attempt <= maxAttempts; attempt++) {
-      try {
-        providerResult = await providerFns[pi]();
-        attempts.push({ attempt, ok: !!providerResult });
-        if (providerResult) break;
-      } catch (err: any) {
-        attempts.push({ attempt, ok: false, error: String(err?.message ?? err) });
+      let imageUrl: string | undefined;
+      let meta: any = {};
+      if (p === 'unsplash') {
+        // simple search endpoint
+        const url = `https://api.unsplash.com/search/photos?query=${encodeURIComponent(query)}&per_page=1`;
+        const res = await timeoutPromise(3000, fetch(url, { headers: { Authorization: `Client-ID ${UNSPLASH_KEY}` } }));
+        if (res.ok) {
+          const json = await res.json();
+          const first = json.results?.[0];
+          if (first?.urls?.raw) {
+            imageUrl = first.urls.raw + '&w=1200&q=80&fm=jpg';
+            meta.author = first.user?.name;
+            meta.originalUrl = first.links?.html;
+            meta.license = 'Unsplash License';
+            meta.width = first.width;
+            meta.height = first.height;
+          }
+        }
+      } else if (p === 'pexels') {
+        const url = `https://api.pexels.com/v1/search?query=${encodeURIComponent(query)}&per_page=1`;
+        const res = await timeoutPromise(3000, fetch(url, { headers: { Authorization: PEXELS_KEY! } }));
+        if (res.ok) {
+          const json = await res.json();
+          const first = json.photos?.[0];
+          if (first?.src?.original) {
+            imageUrl = first.src.original;
+            meta.author = first.photographer;
+            meta.originalUrl = first.url;
+            meta.license = 'Pexels License';
+            meta.width = first.width;
+            meta.height = first.height;
+          }
+        }
+      } else if (p === 'bing') {
+        // Bing Image Search (v7) requires endpoint e.g. https://api.bing.microsoft.com/v7.0/images/search
+        const url = `${BING_ENDPOINT}?q=${encodeURIComponent(query)}&count=1`;
+        const res = await timeoutPromise(3000, fetch(url, { headers: { 'Ocp-Apim-Subscription-Key': BING_KEY! } }));
+        if (res.ok) {
+          const json = await res.json();
+          const first = json.value?.[0];
+          if (first?.contentUrl) {
+            imageUrl = first.contentUrl;
+            meta.author = first.hostPageDisplayUrl;
+            meta.originalUrl = first.hostPageUrl;
+            meta.license = 'Bing Image Search';
+            meta.width = first.width;
+            meta.height = first.height;
+          }
+        }
+      } else if (p === 'google') {
+        const url = `https://www.googleapis.com/customsearch/v1?key=${GOOGLE_KEY}&cx=${GOOGLE_CX}&searchType=image&q=${encodeURIComponent(query)}&num=1`;
+        const res = await timeoutPromise(3000, fetch(url));
+        if (res.ok) {
+          const json = await res.json();
+          const first = json.items?.[0];
+          if (first?.link) {
+            imageUrl = first.link;
+            meta.author = first.image?.contextLink;
+            meta.originalUrl = first.link;
+            meta.license = 'Google CSE';
+            meta.width = first.image?.width;
+            meta.height = first.image?.height;
+          }
+        }
+      } else if (p === 'wikimedia') {
+        // quick wikimedia search
+        const url = `https://en.wikipedia.org/w/api.php?action=query&format=json&prop=imageinfo&generator=search&gsrsearch=${encodeURIComponent(query)}&gsrlimit=1&iiprop=url|width|height|extmetadata`;
+        const res = await timeoutPromise(3000, fetch(url));
+        if (res.ok) {
+          const json = await res.json();
+          const pages = json?.query?.pages;
+          const firstKey = pages && Object.keys(pages)[0];
+          const ii = firstKey ? pages[firstKey].imageinfo?.[0] : undefined;
+          if (ii?.thumburl || ii?.url) {
+            imageUrl = ii.thumburl || ii.url;
+            meta.author = ii?.user;
+            meta.originalUrl = ii?.descriptionurl;
+            meta.license = ii?.extmetadata?.LicenseShortName?.value || 'Wikimedia';
+            meta.width = ii?.width;
+            meta.height = ii?.height;
+          }
+        }
       }
-      // exponential backoff
-      await sleep(200 * Math.pow(2, attempt));
-    }
-    diag.push({ provider: pname, attempts });
-    if (!providerResult) continue;
 
-    // We have an originalUrl — download it and upload to supabase
-    try {
-      const buf = await downloadBuffer(providerResult.originalUrl, 2, timeoutMs * 2);
-      // optional: validate minimal size by checking buffer length (approx)
-      if (buf.length < 5_000) {
-        // too small; try next provider
-        diag.push({ note: "skipping tiny buffer", provider: pname, size: buf.length });
+      if (!imageUrl) {
+        // provider didn't return result; try next
         continue;
       }
-      const upl = await uploadToSupabase(buf, op + "_" + pname, providerResult.originalUrl);
-      const result: FetchImageResult = {
-        provider: pname,
-        author: providerResult.author ?? null,
-        license: providerResult.license ?? null,
-        originalUrl: providerResult.originalUrl,
-        url: upl.url,
-        path: upl.path,
-        width: undefined,
-        height: undefined,
-        attempts,
-        diag
-      };
-      return result;
+
+      // Download the image
+      const { buffer, contentType } = await fetchBuffer(imageUrl, 7000);
+
+      const filename = `itinerary/${operationId ?? 'op'}/${encodeURIComponent(query).slice(0, 120)}-${Date.now()}.jpg`;
+      // upload to supabase storage using service role
+      const uploadRes = await supabaseService.storage.from(BUCKET).upload(filename, buffer, {
+        contentType,
+        upsert: false,
+      });
+
+      if (uploadRes.error) {
+        // If upload error, try to continue to next provider
+        continue;
+      }
+
+      // build public URL
+      const publicUrlData = supabaseService.storage.from(BUCKET).getPublicUrl(filename);
+      const publicUrl = publicUrlData?.data?.publicUrl ?? '';
+
+      return {
+        ok: true,
+        storagePath: filename,
+        publicUrl,
+        provider: p,
+        originalUrl: meta.originalUrl ?? imageUrl,
+        author: meta.author,
+        license: meta.license,
+        width: meta.width,
+        height: meta.height,
+      } as const;
+
     } catch (err: any) {
-      diag.push({ provider: pname, uploadError: String(err?.message ?? err) });
-      // try next provider
+      // on error, try next provider
       continue;
     }
-  }
+  } // end for providers
 
-  // if we reached here, all providers failed
-  const err: any = new Error("IMAGE_FETCH_FAILED");
-  (err as any).code = "IMAGE_FETCH_FAILED";
-  (err as any).diag = diag;
-  throw err;
+  return { ok: false, code: 'IMAGE_FETCH_FAILED', reason: 'All providers failed or timeouts exceeded' };
 }
+
