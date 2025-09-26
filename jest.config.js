@@ -10,5 +10,7 @@ module.exports = {
     '^@/(.*)$': '<rootDir>/src/$1',
     '\\.(css|less|scss|sass)$': '<rootDir>/tests/__mocks__/styleMock.js',
   },
+  moduleDirectories: ['node_modules', '<rootDir>', '<rootDir>/src'],
+  roots: ['<rootDir>', '<rootDir>/src', '<rootDir>/tests'],
   testPathIgnorePatterns: ['/node_modules/', '/.next/'],
 };
