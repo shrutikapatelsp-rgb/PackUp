@@ -7,10 +7,10 @@ module.exports = {
   moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
   setupFilesAfterEnv: ['<rootDir>/jest.setup.ts'],
   moduleNameMapper: {
-    // support @/ alias used by Next/shadcn imports
-    '^@/(.*)$': '<rootDir>/$1',
-    // stub styles
+    '^@/(.*)$': '<rootDir>/src/$1',
     '\\.(css|less|scss|sass)$': '<rootDir>/tests/__mocks__/styleMock.js',
   },
+  moduleDirectories: ['node_modules', '<rootDir>/src'],
+  roots: ['<rootDir>/src', '<rootDir>/tests'],
   testPathIgnorePatterns: ['/node_modules/', '/.next/'],
 };
