@@ -1,9 +1,12 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
+import path from 'path';
 
-// Load component robustly (default or named export)
-const mod = require('@/components/ItineraryCard');
+// Build absolute path to the component to avoid alias/mapper issues
+const compPath = path.resolve(process.cwd(), 'src/components/ItineraryCard.tsx');
+// Require it robustly (handles default or named export)
+const mod = require(compPath);
 const ItineraryCard = mod.default || mod.ItineraryCard;
 
 describe('ItineraryCard', () => {
@@ -17,7 +20,7 @@ describe('ItineraryCard', () => {
         ]}
       ]
     };
-    render(<ItineraryCard itinerary={legacy} />);
+    render(<ItineraryCard itinerary={legacy as any} />);
     expect(screen.getByText('Legacy Trip')).toBeInTheDocument();
     expect(screen.getByText('BLR → GOI')).toBeInTheDocument();
   });
