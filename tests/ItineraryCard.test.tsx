@@ -1,7 +1,10 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import ItineraryCard from '../src/components/ItineraryCard';
+
+// Load component robustly (default or named export)
+const mod = require('@/components/ItineraryCard');
+const ItineraryCard = mod.default || mod.ItineraryCard;
 
 describe('ItineraryCard', () => {
   it('renders legacy itinerary shape', () => {
@@ -14,7 +17,7 @@ describe('ItineraryCard', () => {
         ]}
       ]
     };
-    render(<ItineraryCard itinerary={legacy as any} />);
+    render(<ItineraryCard itinerary={legacy} />);
     expect(screen.getByText('Legacy Trip')).toBeInTheDocument();
     expect(screen.getByText('BLR → GOI')).toBeInTheDocument();
   });
