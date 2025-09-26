@@ -1,7 +1,7 @@
 import React from 'react';
 import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
-import ItineraryCard from '@/components/ItineraryCard';
+import ItineraryCard from '../src/components/ItineraryCard';
 
 describe('ItineraryCard', () => {
   it('renders legacy itinerary shape', () => {
