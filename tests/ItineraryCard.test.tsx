@@ -3,9 +3,10 @@ import { render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom';
 import path from 'path';
 
-// Build absolute path to the component to avoid alias/mapper issues
+// Build absolute path so we don't depend on alias or relative guessing
 const compPath = path.resolve(process.cwd(), 'src/components/ItineraryCard.tsx');
-// Require it robustly (handles default or named export)
+// Require: prefer default export, fallback to named
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const mod = require(compPath);
 const ItineraryCard = mod.default || mod.ItineraryCard;
 
