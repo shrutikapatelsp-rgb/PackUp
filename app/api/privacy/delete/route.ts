@@ -1,50 +1,71 @@
-import { NextRequest, NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
-
-const SUPA_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-
-if (!SUPA_URL || !SERVICE_ROLE) throw new Error("Missing SUPABASE envs");
-
-function extractBearer(req: NextRequest) {
-  const raw = req.headers.get("authorization") || "";
-  const m = raw.match(/^Bearer\s+(.+)$/i);
-  return m?.[1] ?? null;
-}
+// app/api/privacy/delete/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { supabaseAnon, supabaseService } from '../../../lib/supabaseServer';
+import crypto from 'crypto';
 
 export async function DELETE(req: NextRequest) {
-  const opId = `privacy-delete-${Date.now().toString(36)}`;
+  const operationId = crypto.randomUUID();
+  const authHeader = req.headers.get('authorization') || '';
+  if (!authHeader.startsWith('Bearer ')) {
+    return NextResponse.json({ code: 'AUTH_INVALID', message: 'Missing Authorization', operationId }, { status: 401 });
+  }
+  const token = authHeader.replace(/^Bearer\s+/i, '');
+  const anon = supabaseAnon();
   try {
-    const token = extractBearer(req);
-    if (!token) return NextResponse.json({ ok: false, code: "AUTH_INVALID", message: "No token", operationId: opId }, { status: 401 });
+    const usr = await anon.auth.getUser(token);
+    if (!usr?.data?.user) {
+      return NextResponse.json({ code: 'AUTH_INVALID', message: 'Invalid token', operationId }, { status: 401 });
+    }
+    const userId = usr.data.user.id;
 
-    // verify user with anon client
-    const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-    const sb = createClient(SUPA_URL, anon!, { global: { headers: { Authorization: `Bearer ${token}` } } });
-
-    const { data: userData, error: userErr } = await sb.auth.getUser();
-    if (userErr || !userData?.user) return NextResponse.json({ ok: false, code: "AUTH_INVALID", message: "User not found", operationId: opId }, { status: 401 });
-
-    const uid = userData.user.id;
-
-    // Use service-role client to delete PII-scoped rows
-    const svc = createClient(SUPA_URL, SERVICE_ROLE);
-
-    // Delete order_items (by order id)
-    const orders = await svc.from("orders").select("id").eq("user_id", uid);
-    const orderIds = (orders.data || []).map((r: any) => r.id);
+    // Do deletions via service role to bypass RLS safely
+    const deleted: Record<string, number> = {};
+    // delete cart items
+    {
+      const { count, error } = await supabaseService.from('cart_items').delete().eq('user_id', userId).select('*', { count: 'exact' });
+      deleted['cart_items'] = count ?? 0;
+    }
+    // delete order_items via orders first
+    const { data: orders, error: oErr } = await supabaseService.from('orders').select('id').eq('user_id', userId);
+    const orderIds = (orders ?? []).map((o: any) => o.id);
     if (orderIds.length) {
-      await svc.from("order_items").delete().in("order_id", orderIds).select("*");
+      const { count } = await supabaseService.from('order_items').delete().in('order_id', orderIds).select('*', { count: 'exact' });
+      deleted['order_items'] = count ?? 0;
+      const { count: orderCount } = await supabaseService.from('orders').delete().eq('user_id', userId).select('*', { count: 'exact' });
+      deleted['orders'] = orderCount ?? 0;
+    } else {
+      deleted['order_items'] = 0;
+      deleted['orders'] = 0;
     }
 
-    // delete cart items, orders, trips, users
-    await svc.from("cart_items").delete().eq("user_id", uid).select("*");
-    await svc.from("orders").delete().eq("user_id", uid).select("*");
-    await svc.from("trips").delete().eq("user_id", uid).select("*");
-    await svc.from("users").delete().eq("id", uid).select("*");
+    // delete trips
+    {
+      const { count } = await supabaseService.from('trips').delete().eq('user_id', userId).select('*', { count: 'exact' });
+      deleted['trips'] = count ?? 0;
+    }
 
-    return NextResponse.json({ ok: true, deleted: { user: uid }, operationId: opId });
+    // anonymize user row rather than delete (DPDP friendly) - remove PII columns but keep agnostic record
+    const anonEmail = `deleted_${userId}@deleted.packup`;
+    const { error: uErr } = await supabaseService.from('users').update({ email: anonEmail, display_name: 'deleted_user' }).eq('id', userId);
+
+    // write audit event
+    try {
+      await supabaseService.from('events').insert([{
+        type: 'privacy_delete',
+        payload: {
+          user_id: userId,
+          operationId,
+          counts: deleted
+        }
+      }]);
+    } catch (e) {
+      console.warn('privacy delete event failed', e);
+    }
+
+    return NextResponse.json({ ok: true, deleted, operationId }, { status: 200 });
+
   } catch (err: any) {
-    return NextResponse.json({ ok: false, code: err?.code ?? "SERVER_ERROR", message: err?.message ?? "Server error", operationId: opId }, { status: 500 });
+    return NextResponse.json({ code: 'INTERNAL_ERROR', message: String(err?.message ?? err), operationId }, { status: 500 });
   }
 }
+

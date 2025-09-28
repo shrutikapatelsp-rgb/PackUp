@@ -1,69 +1,158 @@
-import { NextRequest, NextResponse } from "next/server";
-import { generateItineraryJSON } from "../../lib/openai";
-import { fetchAndStoreImage } from "../../lib/imageFetcher";
-import { createClient } from "@supabase/supabase-js";
+// app/api/itinerary/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { supabaseAnon, supabaseService } from '../../lib/supabaseServer';
+import { callOpenAIForItinerary } from '../../lib/openai';
+import { fetchImageAndUpload } from '../../lib/imageFetcher';
+import crypto from 'crypto';
 
-const SUPA_URL = process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPA_SERVICE = process.env.SUPABASE_SERVICE_ROLE;
-const SUPA_IMAGE_BUCKET = process.env.SUPABASE_IMAGE_BUCKET || "packup-images";
-
-if (!SUPA_URL || !SUPA_SERVICE) {
-  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE");
+// helper for JSON schema validation (lightweight)
+function validateItineraryObject(obj: any) {
+  if (!obj || typeof obj !== 'object') return { ok: false, reason: 'not_object' };
+  if (!Array.isArray(obj.days)) return { ok: false, reason: 'days_missing' };
+  for (const day of obj.days) {
+    if (typeof day.day !== 'number') return { ok: false, reason: 'day_number_missing' };
+    if (!Array.isArray(day.places)) return { ok: false, reason: 'places_missing' };
+    if (!Array.isArray(day.images)) return { ok: false, reason: 'images_missing' };
+  }
+  return { ok: true };
 }
 
-function extractBearer(req: NextRequest): string | null {
-  const raw = req.headers.get("authorization") || "";
-  const m = raw.match(/^Bearer\s+(.+)$/i);
-  return m?.[1] ?? null;
+function mdFromItinerary(it: any) {
+  const lines: string[] = [];
+  lines.push(`# ${it.title}\n`);
+  for (const d of it.days) {
+    lines.push(`## Day ${d.day}: ${d.theme}`);
+    lines.push(`${d.details}\n`);
+    if (d.places && d.places.length) {
+      lines.push(`**Top places:** ${d.places.join(', ')}`);
+    }
+    if (d.images && d.images.length) {
+      for (const img of d.images) {
+        lines.push(`![${img.caption}](${img.publicUrl})`);
+        lines.push(`*${img.caption} — ${img.author ?? 'source'}*`);
+      }
+    }
+    lines.push('\n---\n');
+  }
+  return lines.join('\n');
 }
 
 export async function POST(req: NextRequest) {
-  const opId = `itinerary_${crypto.randomUUID()}`;
+  const operationId = crypto.randomUUID();
   try {
-    const token = extractBearer(req);
-    if (!token) return NextResponse.json({ code: "AUTH_INVALID", message: "Missing token", operationId: opId }, { status: 401 });
+    const body = await req.json();
+    const { destination, startDate, endDate, origin, days, travelers, style } = body ?? {};
 
-    const body = await req.json().catch(() => null);
-    if (!body || !body.destination || !body.startDate || !body.endDate) {
-      return NextResponse.json({ code: "BAD_REQUEST", message: "Missing required fields", operationId: opId }, { status: 400 });
+    // Validate Authorization Bearer token from client
+    const authHeader = req.headers.get('authorization') || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      return NextResponse.json({ code: 'AUTH_INVALID', message: 'Missing Authorization', operationId }, { status: 401 });
+    }
+    const token = authHeader.replace(/^Bearer\s+/i, '');
+
+    // Validate token via anon client (RLS) to get user id
+    const anon = supabaseAnon();
+    const { data: userResp, error: userErr } = await anon.auth.getUser(token);
+    if (userErr || !userResp?.user) {
+      return NextResponse.json({ code: 'AUTH_INVALID', message: 'Invalid token', details: userErr?.message, operationId }, { status: 401 });
+    }
+    const user = userResp.user;
+    const userId = user.id;
+
+    // build prompt for OpenAI
+    const prompt = `Destination: ${destination}\nStart: ${startDate}\nEnd: ${endDate}\nOrigin: ${origin ?? ''}\nDays: ${days ?? ''}\nTravelers: ${travelers ?? ''}\nStyle: ${style ?? ''}\n\nProduce ONLY the exact strict JSON itinerary schema required.`;
+
+    // call OpenAI (or mock)
+    let rawJsonText: string;
+    try {
+      rawJsonText = await callOpenAIForItinerary({ prompt });
+    } catch (err: any) {
+      return NextResponse.json({ code: 'OPENAI_INVALID_OUTPUT', message: String(err?.message ?? err), operationId }, { status: 502 });
     }
 
-    // generate itinerary JSON (may use mock fallback)
-    const itinerary = await generateItineraryJSON(JSON.stringify(body), opId);
+    // parse JSON
+    let itineraryObj: any;
+    try {
+      itineraryObj = JSON.parse(rawJsonText);
+    } catch (err) {
+      return NextResponse.json({ code: 'OPENAI_INVALID_OUTPUT', message: 'OpenAI produced invalid JSON', details: rawJsonText, operationId }, { status: 502 });
+    }
 
-    // for each day image, fetch & upload using SUPABASE_SERVICE_ROLE client
-    const sb = createClient(SUPA_URL, SUPA_SERVICE);
-    for (const day of itinerary.days || []) {
-      if (!Array.isArray(day.images)) continue;
-      for (const img of day.images) {
-        // fetch via providers and upload to supabase storage
-        const fetched = await fetchAndStoreImage(String(img.query), { operationId: opId, timeoutMs: 7000 });
-        if (!fetched || !fetched.url) {
+    const v = validateItineraryObject(itineraryObj);
+    if (!v.ok) {
+      return NextResponse.json({ code: 'OPENAI_INVALID_OUTPUT', message: `Itinerary validation failed: ${v.reason}`, details: itineraryObj, operationId }, { status: 400 });
+    }
+
+    // For each image query across all days, fetch and upload
+    for (let i = 0; i < itineraryObj.days.length; i++) {
+      const day = itineraryObj.days[i];
+      for (let j = 0; j < day.images.length; j++) {
+        const imgReq = day.images[j];
+        const query = imgReq.query;
+        const res = await fetchImageAndUpload(query, operationId);
+        if (!res.ok) {
+          // If any image fetch fails, return IMAGE_FETCH_FAILED with diagnostics
           return NextResponse.json({
-            code: "IMAGE_FETCH_FAILED",
-            message: `Failed to fetch image for day ${day.day}`,
-            details: { query: img.query, diag: fetched?.diag ?? null },
-            operationId: opId
-          }, { status: 500 });
+            code: 'IMAGE_FETCH_FAILED',
+            message: `Image fetch failed for query: ${query}`,
+            operationId,
+            details: res,
+          }, { status: 502 });
         }
-
-        // NOTE: fetched.provider is used (imageFetcher returns provider property)
-        img.source = fetched.provider as any;
-        img.author = fetched.author ?? null;
-        img.license = fetched.license ?? null;
-        img.originalUrl = fetched.originalUrl;
-        img.url = fetched.url;
-        img.path = fetched.path;
-        img.width = fetched.width;
-        img.height = fetched.height;
+        // attach public url and metadata back into itinerary
+        day.images[j] = {
+          ...imgReq,
+          publicUrl: res.publicUrl,
+          provider: res.provider,
+          originalUrl: res.originalUrl,
+          author: res.author,
+          license: res.license,
+          storagePath: res.storagePath,
+        };
       }
     }
 
-    // create markdown (simple)
-    const markdown = `# ${itinerary.title}\n\n` + (itinerary.days || []).map((d: any) => `## Day ${d.day}: ${d.theme}\n\n${d.details}\n`).join("\n");
+    // create a trip row (server-side) using service role
+    try {
+      const { data: tripData, error: tripError } = await supabaseService
+        .from('trips')
+        .insert([{ user_id: userId, title: itineraryObj.title ?? `Trip to ${destination}`, payload: itineraryObj }])
+        .select()
+        .limit(1)
+        .single();
+      // ignore error but log
+      if (tripError && !tripData) {
+        console.warn('trip insert error', tripError);
+      }
+    } catch (err) {
+      // non-fatal
+      console.warn('trip insert exception', err);
+    }
 
-    return NextResponse.json({ itineraryJson: itinerary, markdown, operationId: opId });
+    // generate markdown summary
+    const markdown = mdFromItinerary(itineraryObj);
+
+    // write an event
+    try {
+      await supabaseService.from('events').insert([{
+        type: 'itinerary_generated',
+        payload: {
+          user_id: userId,
+          destination,
+          startDate,
+          endDate,
+          operationId,
+        }
+      }]);
+    } catch (err) {
+      console.warn('event write failed', err);
+    }
+
+    return NextResponse.json({ itineraryJson: itineraryObj, markdown, operationId }, { status: 200 });
+
   } catch (err: any) {
-    return NextResponse.json({ code: err?.code ?? "SERVER_ERROR", message: err?.message ?? "Server failure", operationId: opId }, { status: 500 });
+    const operationId = crypto.randomUUID();
+    return NextResponse.json({ code: 'INTERNAL_ERROR', message: String(err?.message ?? err), operationId }, { status: 500 });
   }
 }
+

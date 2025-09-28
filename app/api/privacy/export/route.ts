@@ -1,52 +1,60 @@
-/* Uses SUPABASE_URL and SUPABASE_ANON_KEY from env (no NEXT_PUBLIC_ prefix) */
+// app/api/privacy/export/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-
-const URL = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
-const ANON = process.env.SUPABASE_ANON_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY ?? '';
-
-function getBearer(req: NextRequest): string | null {
-  const raw = req.headers.get('authorization') || '';
-  const m = raw.match(/^Bearer\s+(.+)$/i);
-  return m?.[1] ?? null;
-}
-
-function getSupabaseWithJwt(jwt: string) {
-  return createClient(URL, ANON, { global: { headers: { Authorization: `Bearer ${jwt}` } } });
-}
+import { supabaseAnon, supabaseService } from '../../../lib/supabaseServer';
+import crypto from 'crypto';
 
 export async function GET(req: NextRequest) {
-  try {
-    const jwt = getBearer(req);
-    if (!jwt) return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
-    if (!URL || !ANON) {
-      console.error('missing SUPABASE_URL or SUPABASE_ANON_KEY');
-      return NextResponse.json({ ok: false, source: 'live', error: 'Server misconfiguration' }, { status: 500 });
-    }
-    const sb = getSupabaseWithJwt(jwt);
-    const { data: authData, error: authErr } = await sb.auth.getUser();
-    if (authErr || !authData?.user) return NextResponse.json({ ok: false, source: 'live', error: 'Unauthorized' }, { status: 401 });
-    const uid = authData.user.id;
+  const authHeader = req.headers.get('authorization') || '';
+  const operationId = crypto.randomUUID();
 
-    const [uRes, tripsRes, ordersRes, orderItemsRes, cartItemsRes] = await Promise.all([
-      sb.from('users').select('id,email,display_name,created_at').eq('id', uid).maybeSingle(),
-      sb.from('trips').select('*').eq('user_id', uid),
-      sb.from('orders').select('id,total,currency,status,created_at').eq('user_id', uid),
-      sb.from('order_items').select('*').eq('user_id', uid),
-      sb.from('cart_items').select('*').eq('user_id', uid),
-    ]);
+  if (!authHeader.startsWith('Bearer ')) {
+    return NextResponse.json({ code: 'AUTH_INVALID', message: 'Missing Authorization', operationId }, { status: 401 });
+  }
+  const token = authHeader.replace(/^Bearer\s+/i, '');
+  // use anon client to respect RLS
+  const anon = supabaseAnon();
+  try {
+    const usr = await anon.auth.getUser(token);
+    if (!usr?.data?.user) {
+      return NextResponse.json({ code: 'AUTH_INVALID', message: 'Invalid token', operationId }, { status: 401 });
+    }
+    const userId = usr.data.user.id;
+
+    // gather user row
+    const { data: userRows } = await anon.from('users').select('*').eq('id', userId).limit(1);
+    const { data: trips } = await anon.from('trips').select('*').eq('user_id', userId);
+    const { data: cart_items } = await anon.from('cart_items').select('*').eq('user_id', userId);
+    const { data: orders } = await anon.from('orders').select('*').eq('user_id', userId);
+    let order_items = [];
+    if (orders?.length) {
+      const orderIds = orders.map((o: any) => o.id);
+      const { data } = await anon.from('order_items').select('*').in('order_id', orderIds);
+      order_items = data ?? [];
+    }
+
+    // log event using service role
+    try {
+      await supabaseService.from('events').insert([{
+        type: 'privacy_export',
+        payload: { user_id: userId, operationId, counts: { user: userRows?.length ?? 0, trips: trips?.length ?? 0, orders: orders?.length ?? 0, cart_items: cart_items?.length ?? 0 } }
+      }]);
+    } catch (e) {
+      console.warn('privacy export event failed', e);
+    }
 
     return NextResponse.json({
       ok: true,
       source: 'live',
-      user: uRes?.data ?? null,
-      trips: tripsRes?.data ?? [],
-      orders: ordersRes?.data ?? [],
-      order_items: orderItemsRes?.data ?? [],
-      cart_items: cartItemsRes?.data ?? [],
-    });
+      user: userRows?.[0] ?? null,
+      trips,
+      orders,
+      order_items,
+      cart_items,
+      operationId
+    }, { status: 200 });
+
   } catch (err: any) {
-    console.error('privacy/export error', err);
-    return NextResponse.json({ ok: false, source: 'error', error: err?.message ?? 'Server error' }, { status: 500 });
+    return NextResponse.json({ code: 'INTERNAL_ERROR', message: String(err?.message ?? err), operationId }, { status: 500 });
   }
 }
+

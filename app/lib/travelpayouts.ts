@@ -1,22 +1,14 @@
-import { buildAviasalesDeepLink } from "./deeplinks";
+// app/lib/travelpayouts.ts
+import { attachAffiliateParams } from './deeplinks';
 
-export type FlightParams = {
-  origin: string;
-  destination: string;
-  depart: string;
-  ret?: string;
-  adults?: number;
-  userId?: string;
-};
+const TP_MARKER = process.env.TRAVELPAYOUTS_MARKER ?? '<TRAVELPAYOUTS_MARKER>';
 
-export function buildTravelpayoutsFlightLink(p: FlightParams) {
-  // use buildAviasalesDeepLink as primary
-  return buildAviasalesDeepLink({
-    userId: p.userId,
-    origin: p.origin,
-    destination: p.destination,
-    depart: p.depart,
-    ret: p.ret,
-    adults: p.adults ?? 1,
-  });
+export function travelpayoutsFlightLink(baseUrl: string, clickId?: string) {
+  // Travelpayouts expects marker param; also append pseudonymized click_id
+  return attachAffiliateParams(baseUrl, clickId, TP_MARKER);
 }
+
+export function travelpayoutsHotelLink(baseUrl: string, clickId?: string) {
+  return attachAffiliateParams(baseUrl, clickId, TP_MARKER);
+}
+
