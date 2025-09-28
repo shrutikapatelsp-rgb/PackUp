@@ -40,6 +40,7 @@ async function validateBearerUserId(authHeader: string | null): Promise<string |
   return data.user.id;
 }
 
+// Build a destination-specific mock itinerary with image queries
 function buildMockItinerary(body: ReqBody) {
   const dest = body.destination;
   return {
@@ -80,6 +81,7 @@ export async function POST(req: NextRequest) {
     const env = getEnv();
     const body = (await req.json()) as ReqBody;
 
+    // required inputs
     if (!body?.destination || !body?.startDate || !body?.endDate) {
       return NextResponse.json(
         { code: 'BAD_REQUEST', message: 'destination, startDate, endDate are required', operationId },
@@ -87,7 +89,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Require auth (we upload to storage)
+    // require auth (we upload to Supabase Storage)
     const userId = await validateBearerUserId(req.headers.get('authorization'));
     if (!userId) {
       return NextResponse.json(
@@ -96,23 +98,34 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // lazy import heavy libs
     const { fetchImagesForItinerary } = await import('@/app/lib/imageFetcher');
 
+    // MOCK path: still run image pipeline so you get Supabase URLs
     if (env.USE_MOCK === 1) {
       const itineraryJson = buildMockItinerary(body);
-      const withImages = await fetchImagesForItinerary(itineraryJson, { bucket: env.SUPABASE_IMAGE_BUCKET, operationId });
-      const markdown = `# ${withImages.title}\n` + withImages.days.map((d: any) => `- Day ${d.day}: ${d.theme}`).join('\n');
+      const withImages = await fetchImagesForItinerary(itineraryJson, {
+        bucket: env.SUPABASE_IMAGE_BUCKET,
+        operationId,
+      });
+      const markdown =
+        `# ${withImages.title}\n` + withImages.days.map((d: any) => `- Day ${d.day}: ${d.theme}`).join('\n');
       return NextResponse.json({ itineraryJson: withImages, markdown, operationId }, { status: 200 });
     }
 
+    // REAL path: generate with OpenAI, then add images
     const { getStrictItinerary } = await import('@/app/lib/openai');
     const itineraryJson = await getStrictItinerary(body, {
       model: env.OPENAI_MODEL,
       apiKey: env.OPENAI_API_KEY,
       operationId,
     });
-    const withImages = await fetchImagesForItinerary(itineraryJson, { bucket: env.SUPABASE_IMAGE_BUCKET, operationId });
-    const markdown = `# ${withImages.title}\n` + withImages.days.map((d: any) => `- Day ${d.day}: ${d.theme}`).join('\n');
+    const withImages = await fetchImagesForItinerary(itineraryJson, {
+      bucket: env.SUPABASE_IMAGE_BUCKET,
+      operationId,
+    });
+    const markdown =
+      `# ${withImages.title}\n` + withImages.days.map((d: any) => `- Day ${d.day}: ${d.theme}`).join('\n');
     return NextResponse.json({ itineraryJson: withImages, markdown, operationId }, { status: 200 });
   } catch (err: any) {
     const message = err?.message || 'Unknown error';
@@ -128,3 +141,4 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
+TS
