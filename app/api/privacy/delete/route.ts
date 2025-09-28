@@ -42,39 +42,6 @@ async function writeAuditEvent(client: any, user_id: string, operationId: string
   } catch { /* best-effort only */ }
 }
 
-/**
- * Resolve how to delete cart_items for a user:
- *  - Try user columns: user_id, userId, owner_id, customer_id
- *  - Else fall back to trip_id IN (user's trips)
- */
-async function deleteCartItemsForUser(srv: any, user_id: string, tripIds: string[]) {
-  const candidates = ['user_id', 'userId', 'owner_id', 'customer_id'];
-
-  for (const col of candidates) {
-    const trial = await srv.from('cart_items').select('id').eq(col as any, user_id).limit(1);
-    if (trial.error) {
-      if (/does not exist/i.test(String(trial.error.message))) continue;
-      // other errors: assume column exists and try delete using it
-    }
-    const del = await srv.from('cart_items').delete().eq(col as any, user_id).select('id');
-    if (!del.error) return del.data?.length || 0;
-    // if we errored, try next candidate
-  }
-
-  if (tripIds.length > 0) {
-    const trial = await srv.from('cart_items').select('id').in('trip_id' as any, tripIds).limit(1);
-    if (!trial.error || !/does not exist/i.test(String(trial.error?.message || ''))) {
-      const del = await srv.from('cart_items').delete().in('trip_id', tripIds).select('id');
-      if (!del.error) return del.data?.length || 0;
-      // fall-through prints error in caller
-      throw new Error(del.error?.message || 'cart_items delete via trip_id failed');
-    }
-  }
-
-  // nothing matched – treat as zero deletions
-  return 0;
-}
-
 export async function DELETE(req: NextRequest) {
   const operationId =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
@@ -128,11 +95,13 @@ export async function DELETE(req: NextRequest) {
       deleted.orders = delOrders.data?.length || 0;
     }
 
-    // 4) Delete cart_items – adaptive (user column or trip join)
-    try {
-      deleted.cart_items = await deleteCartItemsForUser(srv, user_id, tripIds);
-    } catch (e: any) {
-      return NextResponse.json({ code: 'DB_ERROR', message: e?.message || 'Cart items delete failed', operationId }, { status: 500 });
+    // 4) Delete cart_items via trip_id
+    if (tripIds.length > 0) {
+      const delCart = await srv.from('cart_items').delete().in('trip_id', tripIds).select('id');
+      if (delCart.error) {
+        return NextResponse.json({ code: 'DB_ERROR', message: delCart.error.message, operationId }, { status: 500 });
+      }
+      deleted.cart_items = delCart.data?.length || 0;
     }
 
     // 5) Delete trips
