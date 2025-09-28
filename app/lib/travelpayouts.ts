@@ -1,11 +1,14 @@
-const deep_link = buildAviasalesDeepLink({
-  base: env.TP_DEEPLINK_BASE,
-  marker: env.TP_MARKER,
-  origin,
-  destination,
-  depart,
-  ret,
-  adults: params.adults ?? 1,
-  userId: 'anon' // or the real user id if you have it in this context
-});
+// app/lib/travelpayouts.ts
+import { attachAffiliateParams } from './deeplinks';
+
+const TP_MARKER = process.env.TRAVELPAYOUTS_MARKER ?? '<TRAVELPAYOUTS_MARKER>';
+
+export function travelpayoutsFlightLink(baseUrl: string, clickId?: string) {
+  // Travelpayouts expects marker param; also append pseudonymized click_id
+  return attachAffiliateParams(baseUrl, clickId, TP_MARKER);
+}
+
+export function travelpayoutsHotelLink(baseUrl: string, clickId?: string) {
+  return attachAffiliateParams(baseUrl, clickId, TP_MARKER);
+}
 

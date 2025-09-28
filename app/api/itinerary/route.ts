@@ -1,106 +1,106 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { v4 as uuidv4 } from 'uuid';
+
+// Force runtime behavior to avoid static optimization
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
 export const runtime = 'nodejs';
 
-import type { NextRequest } from 'next/server';
-import { NextResponse } from 'next/server';
-
-// ---- Types ----
-type ItinIntent = {
+type ReqBody = {
+  destination: string;
+  startDate: string;
+  endDate: string;
   origin?: string;
-  destination?: string;
-  date_from?: string;
-  date_to?: string;
-  pax?: number;
-  budget?: number;
-  vibe?: string;
+  days?: number;
+  travelers?: string;
+  style?: string;
 };
 
-type Flight = { provider: string; from: string; to: string; price: number; currency: string; depart?: string; return?: string; };
-type Hotel  = { provider: string; name: string; nights: number; price: number; currency: string; };
-type Activity = { provider: string; name: string; price: number; currency: string; };
+function readEnv() {
+  return {
+    USE_MOCK: process.env.USE_MOCK === '1' ? 1 : 0,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    SUPABASE_URL: process.env.SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE: process.env.SUPABASE_SERVICE_ROLE,
+    SUPABASE_IMAGE_BUCKET: process.env.SUPABASE_IMAGE_BUCKET || 'packup-images',
+    GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
+    GOOGLE_CX: process.env.GOOGLE_CX,
+  };
+}
 
-type Itinerary = {
-  flights: Flight[];
-  hotels: Hotel[];
-  activities: Activity[];
-  notes?: string;
-};
-
-type ChatMessage = { role: 'system' | 'user'; content: string };
-
-// ---- Mock Data ----
-const MOCK: Itinerary = {
-  flights: [
-    { provider: 'MockAir', from: 'BLR', to: 'IXL', price: 14500, currency: 'INR', depart: '2025-09-01', return: '2025-09-11' }
-  ],
-  hotels: [
-    { provider: 'MockStay', name: 'Leh View Inn', nights: 10, price: 32000, currency: 'INR' }
-  ],
-  activities: [
-    { provider: 'MockTours', name: 'Khardung La Day Trip', price: 2500, currency: 'INR' }
-  ],
-};
-
-function mockResponse(intent: ItinIntent, note: string): Itinerary {
-  return { ...MOCK, notes: `${note} | intent=${JSON.stringify(intent)}` };
+async function strictJsonItineraryPrompt(_: ReqBody) {
+  // Keep prompt construction inside the function
+  return {
+    title: 'Mock Trip',
+    days: [
+      {
+        day: 1,
+        theme: 'Arrival',
+        places: ['Main Square'],
+        details: 'Welcome!',
+        images: [{ query: 'city skyline sunrise', caption: 'Sunrise', reason: 'Arrival vibe' }],
+      },
+    ],
+  };
 }
 
 export async function POST(req: NextRequest) {
-  const intent = (await safeJson(req)) as ItinIntent;
-
-  // Force mock via env
-  if (process.env.USE_MOCK === '1') {
-    return NextResponse.json<Itinerary>(mockResponse(intent, 'Mock mode enabled via USE_MOCK=1'), { status: 200 });
-  }
-
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return NextResponse.json<Itinerary>(mockResponse(intent, 'OPENAI_API_KEY missing; returning mock'), { status: 200 });
-  }
+  const operationId = uuidv4();
 
   try {
-    const { default: OpenAI } = await import('openai');
-    const client = new OpenAI({ apiKey });
+    const env = readEnv();
+    const body = (await req.json()) as ReqBody;
 
-    const sys =
-      "You are Packup's itinerary planner. Return compact JSON with keys: flights, hotels, activities, notes. " +
-      "Use realistic but concise results. If input is vague, assume sensible defaults. Output pure JSON only.";
+    // Basic validation
+    if (!body?.destination || !body?.startDate || !body?.endDate) {
+      return NextResponse.json(
+        { code: 'BAD_REQUEST', message: 'destination, startDate, endDate are required', operationId },
+        { status: 400 }
+      );
+    }
 
-    const messages: ChatMessage[] = [
-      { role: 'system', content: sys },
-      { role: 'user', content: JSON.stringify({ intent, candidate_offers: MOCK }) }
-    ];
+    // MOCK path (no external deps)
+    if (env.USE_MOCK === 1) {
+      const itineraryJson = await strictJsonItineraryPrompt(body);
+      const markdown = `# ${itineraryJson.title}\n\n- Day 1: ${itineraryJson.days[0].theme}`;
+      return NextResponse.json({ itineraryJson, markdown, operationId }, { status: 200 });
+    }
 
-    const r = await client.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages,
-      temperature: 0.2,
+    // Real path: import heavy libs lazily to avoid build-time side-effects
+    const [{ getStrictItinerary }, { fetchImagesForItinerary }] = await Promise.all([
+      import('@/app/lib/openai'),
+      import('@/app/lib/imageFetcher'),
+    ]);
+
+    // Generate
+    const itineraryJson = await getStrictItinerary(body, {
+      model: env.OPENAI_MODEL,
+      apiKey: env.OPENAI_API_KEY,
+      operationId,
     });
 
-    const text = r.choices?.[0]?.message?.content ?? '{}';
+    // Fetch & upload images (throws IMAGE_FETCH_FAILED on total failure)
+    const withImages = await fetchImagesForItinerary(itineraryJson, {
+      bucket: env.SUPABASE_IMAGE_BUCKET!,
+      operationId,
+    });
 
-    try {
-      const json = JSON.parse(text) as Partial<Itinerary>;
-      const result: Itinerary = {
-        flights: Array.isArray(json.flights) ? (json.flights as Flight[]) : MOCK.flights,
-        hotels: Array.isArray(json.hotels) ? (json.hotels as Hotel[]) : MOCK.hotels,
-        activities: Array.isArray(json.activities) ? (json.activities as Activity[]) : MOCK.activities,
-        notes: typeof json.notes === 'string' ? json.notes : 'AI response parsed; some fields defaulted',
-      };
-      return NextResponse.json<Itinerary>(result, { status: 200 });
-    } catch {
-      return NextResponse.json<Itinerary>(mockResponse(intent, 'Model returned non-JSON; using mock'), { status: 200 });
-    }
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json<Itinerary>(mockResponse(intent, `OpenAI error: ${msg}; returning mock`), { status: 200 });
+    const markdown = `# ${withImages.title}\n` + withImages.days.map(d => `- Day ${d.day}: ${d.theme}`).join('\n');
+
+    return NextResponse.json({ itineraryJson: withImages, markdown, operationId }, { status: 200 });
+  } catch (err: any) {
+    // Normalize known codes if thrown upstream
+    const message = err?.message || 'Unknown error';
+    const code =
+      err?.code && typeof err.code === 'string'
+        ? err.code
+        : message.includes('IMAGE_FETCH_FAILED')
+        ? 'IMAGE_FETCH_FAILED'
+        : message.includes('OPENAI')
+        ? 'OPENAI_INVALID_OUTPUT'
+        : 'INTERNAL_ERROR';
+
+    return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
-
-async function safeJson(req: Request): Promise<unknown> {
-  try {
-    return await req.json();
-  } catch {
-    return {};
-  }
-}
-

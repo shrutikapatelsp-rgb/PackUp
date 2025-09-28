@@ -1,45 +1,36 @@
-import { NextResponse } from "next/server";
-import OpenAI from "openai";
+// app/api/chat/route.ts
+import { NextRequest, NextResponse } from 'next/server';
+import { callOpenAIForItinerary } from '../../lib/openai';
+import { supabaseAnon } from '../../lib/supabaseServer';
+import crypto from 'crypto';
 
-export const runtime = "nodejs";
-
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-const mockReply = `✈️ Flights: BLR → GOI roundtrip
-🏨 Stay: Beach Resort, 3 nights
-🏝️ Activities: Baga Beach, Water Sports, Night Market
-🍲 Food: Seafood shacks & cafes`;
-
-export async function POST(req: Request) {
+export async function POST(req: NextRequest) {
+  const operationId = crypto.randomUUID();
   try {
-    const { message } = await req.json();
+    const body = await req.json();
+    const { prompt } = body ?? {};
 
-    if (!message) {
-      return NextResponse.json({ error: "message is required" }, { status: 400 });
+    const USE_MOCK = (process.env.USE_MOCK ?? '1') === '1';
+    if (USE_MOCK) {
+      const mock = {
+        message: 'Mock itinerary generated (USE_MOCK=1).',
+        itinerary: {
+          title: 'Mock Trip',
+          days: [
+            { day: 1, theme: 'Mock day', places: ['Mock Place'], details: 'This is a mock day.', images: [{ query: 'Pangong Tso', caption: 'Pangong', reason: 'Iconic' }] }
+          ]
+        }
+      };
+      return NextResponse.json({ ...mock, operationId });
     }
 
-    // If USE_MOCK=1, always return mock
-    if (process.env.USE_MOCK === "1") {
-      return NextResponse.json({ ok: true, reply: mockReply });
-    }
+    // If prompt includes "generate itinerary", call itinerary generator path (server-side)
+    const raw = await callOpenAIForItinerary({ prompt });
+    // return raw JSON as text (client may parse)
+    return NextResponse.json({ raw, operationId });
 
-    const chat = await client.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: "You are a helpful travel planning assistant." },
-        { role: "user", content: message },
-      ],
-      temperature: 0.7,
-      max_tokens: 300,
-    });
-
-    const reply = chat.choices[0]?.message?.content || mockReply;
-    return NextResponse.json({ ok: true, reply });
   } catch (err: any) {
-    console.error("OpenAI error:", err.message);
-
-    // fallback to mock
-    return NextResponse.json({ ok: true, reply: mockReply });
+    return NextResponse.json({ code: 'OPENAI_INVALID_OUTPUT', message: String(err?.message ?? err), operationId }, { status: 502 });
   }
 }
 

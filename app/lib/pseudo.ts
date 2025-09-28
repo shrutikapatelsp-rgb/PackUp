@@ -1,14 +1,12 @@
+// app/lib/pseudo.ts
 import crypto from 'crypto';
 
-/**
- * Creates a pseudonymous click_id for affiliates (no PII).
- * Do NOT pass email or names. Use userId or 'anon'.
- */
-const SECRET = process.env.PSEUDONYM_SALT || 'rotate-me';
+const KEY = process.env.CLICK_ID_SECRET ?? '<CLICK_ID_SECRET_PLACEHOLDER>';
 
-export function makeClickId(userId: string, ctx: Record<string, any> = {}) {
-  // keep payload minimal; include timestamp to avoid reuse
-  const payload = JSON.stringify({ u: userId, t: Date.now(), ...ctx });
-  return crypto.createHmac('sha256', SECRET).update(payload).digest('hex').slice(0, 32);
+export function pseudonymizeClickId(raw: string) {
+  // use HMAC-SHA256 of raw using CLICK_ID_SECRET and return hex
+  const h = crypto.createHmac('sha256', KEY);
+  h.update(raw);
+  return h.digest('hex');
 }
 
