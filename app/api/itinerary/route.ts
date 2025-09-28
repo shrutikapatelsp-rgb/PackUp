@@ -1,158 +1,106 @@
-// app/api/itinerary/route.ts
 import { NextRequest, NextResponse } from 'next/server';
-import { supabaseAnon, supabaseService } from '../../lib/supabaseServer';
-import { callOpenAIForItinerary } from '../../lib/openai';
-import { fetchImageAndUpload } from '../../lib/imageFetcher';
-import crypto from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
 
-// helper for JSON schema validation (lightweight)
-function validateItineraryObject(obj: any) {
-  if (!obj || typeof obj !== 'object') return { ok: false, reason: 'not_object' };
-  if (!Array.isArray(obj.days)) return { ok: false, reason: 'days_missing' };
-  for (const day of obj.days) {
-    if (typeof day.day !== 'number') return { ok: false, reason: 'day_number_missing' };
-    if (!Array.isArray(day.places)) return { ok: false, reason: 'places_missing' };
-    if (!Array.isArray(day.images)) return { ok: false, reason: 'images_missing' };
-  }
-  return { ok: true };
+// Force runtime behavior to avoid static optimization
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const runtime = 'nodejs';
+
+type ReqBody = {
+  destination: string;
+  startDate: string;
+  endDate: string;
+  origin?: string;
+  days?: number;
+  travelers?: string;
+  style?: string;
+};
+
+function readEnv() {
+  return {
+    USE_MOCK: process.env.USE_MOCK === '1' ? 1 : 0,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    OPENAI_MODEL: process.env.OPENAI_MODEL || 'gpt-4o-mini',
+    SUPABASE_URL: process.env.SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE: process.env.SUPABASE_SERVICE_ROLE,
+    SUPABASE_IMAGE_BUCKET: process.env.SUPABASE_IMAGE_BUCKET || 'packup-images',
+    GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
+    GOOGLE_CX: process.env.GOOGLE_CX,
+  };
 }
 
-function mdFromItinerary(it: any) {
-  const lines: string[] = [];
-  lines.push(`# ${it.title}\n`);
-  for (const d of it.days) {
-    lines.push(`## Day ${d.day}: ${d.theme}`);
-    lines.push(`${d.details}\n`);
-    if (d.places && d.places.length) {
-      lines.push(`**Top places:** ${d.places.join(', ')}`);
-    }
-    if (d.images && d.images.length) {
-      for (const img of d.images) {
-        lines.push(`![${img.caption}](${img.publicUrl})`);
-        lines.push(`*${img.caption} — ${img.author ?? 'source'}*`);
-      }
-    }
-    lines.push('\n---\n');
-  }
-  return lines.join('\n');
+async function strictJsonItineraryPrompt(_: ReqBody) {
+  // Keep prompt construction inside the function
+  return {
+    title: 'Mock Trip',
+    days: [
+      {
+        day: 1,
+        theme: 'Arrival',
+        places: ['Main Square'],
+        details: 'Welcome!',
+        images: [{ query: 'city skyline sunrise', caption: 'Sunrise', reason: 'Arrival vibe' }],
+      },
+    ],
+  };
 }
 
 export async function POST(req: NextRequest) {
-  const operationId = crypto.randomUUID();
+  const operationId = uuidv4();
+
   try {
-    const body = await req.json();
-    const { destination, startDate, endDate, origin, days, travelers, style } = body ?? {};
+    const env = readEnv();
+    const body = (await req.json()) as ReqBody;
 
-    // Validate Authorization Bearer token from client
-    const authHeader = req.headers.get('authorization') || '';
-    if (!authHeader.startsWith('Bearer ')) {
-      return NextResponse.json({ code: 'AUTH_INVALID', message: 'Missing Authorization', operationId }, { status: 401 });
-    }
-    const token = authHeader.replace(/^Bearer\s+/i, '');
-
-    // Validate token via anon client (RLS) to get user id
-    const anon = supabaseAnon();
-    const { data: userResp, error: userErr } = await anon.auth.getUser(token);
-    if (userErr || !userResp?.user) {
-      return NextResponse.json({ code: 'AUTH_INVALID', message: 'Invalid token', details: userErr?.message, operationId }, { status: 401 });
-    }
-    const user = userResp.user;
-    const userId = user.id;
-
-    // build prompt for OpenAI
-    const prompt = `Destination: ${destination}\nStart: ${startDate}\nEnd: ${endDate}\nOrigin: ${origin ?? ''}\nDays: ${days ?? ''}\nTravelers: ${travelers ?? ''}\nStyle: ${style ?? ''}\n\nProduce ONLY the exact strict JSON itinerary schema required.`;
-
-    // call OpenAI (or mock)
-    let rawJsonText: string;
-    try {
-      rawJsonText = await callOpenAIForItinerary({ prompt });
-    } catch (err: any) {
-      return NextResponse.json({ code: 'OPENAI_INVALID_OUTPUT', message: String(err?.message ?? err), operationId }, { status: 502 });
+    // Basic validation
+    if (!body?.destination || !body?.startDate || !body?.endDate) {
+      return NextResponse.json(
+        { code: 'BAD_REQUEST', message: 'destination, startDate, endDate are required', operationId },
+        { status: 400 }
+      );
     }
 
-    // parse JSON
-    let itineraryObj: any;
-    try {
-      itineraryObj = JSON.parse(rawJsonText);
-    } catch (err) {
-      return NextResponse.json({ code: 'OPENAI_INVALID_OUTPUT', message: 'OpenAI produced invalid JSON', details: rawJsonText, operationId }, { status: 502 });
+    // MOCK path (no external deps)
+    if (env.USE_MOCK === 1) {
+      const itineraryJson = await strictJsonItineraryPrompt(body);
+      const markdown = `# ${itineraryJson.title}\n\n- Day 1: ${itineraryJson.days[0].theme}`;
+      return NextResponse.json({ itineraryJson, markdown, operationId }, { status: 200 });
     }
 
-    const v = validateItineraryObject(itineraryObj);
-    if (!v.ok) {
-      return NextResponse.json({ code: 'OPENAI_INVALID_OUTPUT', message: `Itinerary validation failed: ${v.reason}`, details: itineraryObj, operationId }, { status: 400 });
-    }
+    // Real path: import heavy libs lazily to avoid build-time side-effects
+    const [{ getStrictItinerary }, { fetchImagesForItinerary }] = await Promise.all([
+      import('@/app/lib/openai'),
+      import('@/app/lib/imageFetcher'),
+    ]);
 
-    // For each image query across all days, fetch and upload
-    for (let i = 0; i < itineraryObj.days.length; i++) {
-      const day = itineraryObj.days[i];
-      for (let j = 0; j < day.images.length; j++) {
-        const imgReq = day.images[j];
-        const query = imgReq.query;
-        const res = await fetchImageAndUpload(query, operationId);
-        if (!res.ok) {
-          // If any image fetch fails, return IMAGE_FETCH_FAILED with diagnostics
-          return NextResponse.json({
-            code: 'IMAGE_FETCH_FAILED',
-            message: `Image fetch failed for query: ${query}`,
-            operationId,
-            details: res,
-          }, { status: 502 });
-        }
-        // attach public url and metadata back into itinerary
-        day.images[j] = {
-          ...imgReq,
-          publicUrl: res.publicUrl,
-          provider: res.provider,
-          originalUrl: res.originalUrl,
-          author: res.author,
-          license: res.license,
-          storagePath: res.storagePath,
-        };
-      }
-    }
+    // Generate
+    const itineraryJson = await getStrictItinerary(body, {
+      model: env.OPENAI_MODEL,
+      apiKey: env.OPENAI_API_KEY,
+      operationId,
+    });
 
-    // create a trip row (server-side) using service role
-    try {
-      const { data: tripData, error: tripError } = await supabaseService
-        .from('trips')
-        .insert([{ user_id: userId, title: itineraryObj.title ?? `Trip to ${destination}`, payload: itineraryObj }])
-        .select()
-        .limit(1)
-        .single();
-      // ignore error but log
-      if (tripError && !tripData) {
-        console.warn('trip insert error', tripError);
-      }
-    } catch (err) {
-      // non-fatal
-      console.warn('trip insert exception', err);
-    }
+    // Fetch & upload images (throws IMAGE_FETCH_FAILED on total failure)
+    const withImages = await fetchImagesForItinerary(itineraryJson, {
+      bucket: env.SUPABASE_IMAGE_BUCKET!,
+      operationId,
+    });
 
-    // generate markdown summary
-    const markdown = mdFromItinerary(itineraryObj);
+    const markdown = `# ${withImages.title}\n` + withImages.days.map(d => `- Day ${d.day}: ${d.theme}`).join('\n');
 
-    // write an event
-    try {
-      await supabaseService.from('events').insert([{
-        type: 'itinerary_generated',
-        payload: {
-          user_id: userId,
-          destination,
-          startDate,
-          endDate,
-          operationId,
-        }
-      }]);
-    } catch (err) {
-      console.warn('event write failed', err);
-    }
-
-    return NextResponse.json({ itineraryJson: itineraryObj, markdown, operationId }, { status: 200 });
-
+    return NextResponse.json({ itineraryJson: withImages, markdown, operationId }, { status: 200 });
   } catch (err: any) {
-    const operationId = crypto.randomUUID();
-    return NextResponse.json({ code: 'INTERNAL_ERROR', message: String(err?.message ?? err), operationId }, { status: 500 });
+    // Normalize known codes if thrown upstream
+    const message = err?.message || 'Unknown error';
+    const code =
+      err?.code && typeof err.code === 'string'
+        ? err.code
+        : message.includes('IMAGE_FETCH_FAILED')
+        ? 'IMAGE_FETCH_FAILED'
+        : message.includes('OPENAI')
+        ? 'OPENAI_INVALID_OUTPUT'
+        : 'INTERNAL_ERROR';
+
+    return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
-
