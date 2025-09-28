@@ -1,17 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Avoid static optimization
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const runtime = 'nodejs';
 
-type DeletedCounts = {
-  order_items: number;
-  orders: number;
-  cart_items: number;
-  trips: number;
-  users: number;
-};
+type DeletedCounts = { order_items: number; orders: number; cart_items: number; trips: number; users: number };
 
 function getEnv() {
   const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -43,15 +36,10 @@ async function validateBearerUserId(authHeader: string | null): Promise<string |
   return data.user.id;
 }
 
-async function writeAuditEvent(eventsClient: any, user_id: string, operationId: string, deleted: DeletedCounts) {
+async function writeAuditEvent(client: any, user_id: string, operationId: string, deleted: DeletedCounts) {
   try {
-    await eventsClient.from('events').insert({
-      type: 'privacy.delete',
-      payload: { user_id, operationId, deleted },
-    });
-  } catch {
-    // best-effort only
-  }
+    await client.from('events').insert({ type: 'privacy.delete', payload: { user_id, operationId, deleted } });
+  } catch { /* best-effort only */ }
 }
 
 export async function DELETE(req: NextRequest) {
@@ -73,61 +61,60 @@ export async function DELETE(req: NextRequest) {
 
     const deleted: DeletedCounts = { order_items: 0, orders: 0, cart_items: 0, trips: 0, users: 0 };
 
-    // Gather order ids, then delete order_items
-    const { data: ordersList, error: ordersListErr } = await srv.from('orders').select('id').eq('user_id', user_id);
-    if (ordersListErr) {
-      return NextResponse.json({ code: 'DB_ERROR', message: ordersListErr.message, operationId }, { status: 500 });
+    // 1) Trips for this user
+    const tripsRes = await srv.from('trips').select('id').eq('user_id', user_id);
+    if (tripsRes.error) {
+      return NextResponse.json({ code: 'DB_ERROR', message: tripsRes.error.message, operationId }, { status: 500 });
     }
-    const orderIds = (ordersList || []).map((o: any) => o.id);
+    const tripIds = (tripsRes.data || []).map((t: any) => t.id);
 
-    if (orderIds.length > 0) {
-      const { data: delOrderItems, error: delOrderItemsErr } = await srv
-        .from('order_items')
-        .delete()
-        .in('order_id', orderIds)
-        .select('id');
-      if (delOrderItemsErr) {
-        return NextResponse.json({ code: 'DB_ERROR', message: delOrderItemsErr.message, operationId }, { status: 500 });
+    // 2) Orders for those trips
+    let orderIds: string[] = [];
+    if (tripIds.length > 0) {
+      const ordersRes = await srv.from('orders').select('id').in('trip_id', tripIds);
+      if (ordersRes.error) {
+        return NextResponse.json({ code: 'DB_ERROR', message: ordersRes.error.message, operationId }, { status: 500 });
       }
-      deleted.order_items = delOrderItems?.length || 0;
+      orderIds = (ordersRes.data || []).map((o: any) => o.id);
     }
 
-    const { data: delOrders, error: delOrdersErr } = await srv
-      .from('orders')
-      .delete()
-      .eq('user_id', user_id)
-      .select('id');
-    if (delOrdersErr) {
-      return NextResponse.json({ code: 'DB_ERROR', message: delOrdersErr.message, operationId }, { status: 500 });
+    // 3) Delete order_items → then orders
+    if (orderIds.length > 0) {
+      const delOrderItems = await srv.from('order_items').delete().in('order_id', orderIds).select('id');
+      if (delOrderItems.error) {
+        return NextResponse.json({ code: 'DB_ERROR', message: delOrderItems.error.message, operationId }, { status: 500 });
+      }
+      deleted.order_items = delOrderItems.data?.length || 0;
     }
-    deleted.orders = delOrders?.length || 0;
 
-    const { data: delCart, error: delCartErr } = await srv
-      .from('cart_items')
-      .delete()
-      .eq('user_id', user_id)
-      .select('id');
-    if (delCartErr) {
-      return NextResponse.json({ code: 'DB_ERROR', message: delCartErr.message, operationId }, { status: 500 });
+    if (tripIds.length > 0) {
+      const delOrders = await srv.from('orders').delete().in('trip_id', tripIds).select('id');
+      if (delOrders.error) {
+        return NextResponse.json({ code: 'DB_ERROR', message: delOrders.error.message, operationId }, { status: 500 });
+      }
+      deleted.orders = delOrders.data?.length || 0;
     }
-    deleted.cart_items = delCart?.length || 0;
 
-    const { data: delTrips, error: delTripsErr } = await srv
-      .from('trips')
-      .delete()
-      .eq('user_id', user_id)
-      .select('id');
-    if (delTripsErr) {
-      return NextResponse.json({ code: 'DB_ERROR', message: delTripsErr.message, operationId }, { status: 500 });
+    // 4) Delete cart_items for user
+    const delCart = await srv.from('cart_items').delete().eq('user_id', user_id).select('id');
+    if (delCart.error) {
+      return NextResponse.json({ code: 'DB_ERROR', message: delCart.error.message, operationId }, { status: 500 });
     }
-    deleted.trips = delTrips?.length || 0;
+    deleted.cart_items = delCart.data?.length || 0;
 
-    const { data: delUsers, error: delUsersErr } = await srv.from('users').delete().eq('id', user_id).select('id');
-    if (delUsersErr) {
-      // anonymize fallback if FK prevents delete
+    // 5) Delete trips
+    const delTrips = await srv.from('trips').delete().eq('user_id', user_id).select('id');
+    if (delTrips.error) {
+      return NextResponse.json({ code: 'DB_ERROR', message: delTrips.error.message, operationId }, { status: 500 });
+    }
+    deleted.trips = delTrips.data?.length || 0;
+
+    // 6) Delete or anonymize user
+    const delUsers = await srv.from('users').delete().eq('id', user_id).select('id');
+    if (delUsers.error) {
       await srv.from('users').update({ email: null, display_name: null }).eq('id', user_id);
     } else {
-      deleted.users = delUsers?.length || 0;
+      deleted.users = delUsers.data?.length || 0;
     }
 
     await writeAuditEvent(srv, user_id, operationId, deleted);
@@ -138,5 +125,3 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
-
-
