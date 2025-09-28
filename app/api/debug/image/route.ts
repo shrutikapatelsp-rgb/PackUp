@@ -1,28 +1,56 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { v4 as uuidv4 } from 'uuid';
-import { validateBearer } from '@/app/lib/supabaseServer';
-import { fetchOneImage } from '@/app/lib/imageFetcher';
 
-// Ensure this route always runs on the server (no static rendering)
+// Avoid static optimization / build-time evaluation
 export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+export const runtime = 'nodejs';
+
+function getEnv() {
+  const SUPABASE_URL = process.env.SUPABASE_URL;
+  const NEXT_PUBLIC_SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (!SUPABASE_URL || !NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+    const missing = [
+      !SUPABASE_URL && 'SUPABASE_URL',
+      !NEXT_PUBLIC_SUPABASE_ANON_KEY && 'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+    ].filter(Boolean);
+    const err: any = new Error(`Missing env: ${missing.join(', ')}`);
+    err.code = 'ENV_MISSING';
+    throw err;
+  }
+  return { SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY };
+}
+
+async function validateBearerUserId(authHeader: string | null): Promise<string | null> {
+  if (!authHeader || !authHeader.toLowerCase().startsWith('bearer ')) return null;
+  const token = authHeader.split(' ')[1]?.trim();
+  if (!token) return null;
+
+  const { SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY } = getEnv();
+  const { createClient } = await import('@supabase/supabase-js');
+  const anon = createClient(SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY);
+  const { data, error } = await anon.auth.getUser(token);
+  if (error || !data?.user?.id) return null;
+  return data.user.id;
+}
 
 export async function GET(req: NextRequest) {
-  const operationId = uuidv4();
+  // Use crypto.randomUUID() to avoid importing uuid at top-level
+  const operationId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : Math.random().toString(36).slice(2);
 
   try {
-    // 1) Auth: require a valid Supabase user access token
-    const authHeader = req.headers.get('authorization') || '';
-    const user = await validateBearer(authHeader);
-    if (!user) {
+    // Auth (user access token)
+    const userId = await validateBearerUserId(req.headers.get('authorization'));
+    if (!userId) {
       return NextResponse.json(
-        { code: 'AUTH_INVALID', message: 'Missing or invalid token', operationId },
+        { code: 'AUTH_INVALID', message: 'Missing or invalid Bearer token', operationId },
         { status: 401 }
       );
     }
 
-    // 2) Read query param
     const { searchParams } = new URL(req.url);
-    const q = searchParams.get('q');
+    const q = searchParams.get('q')?.trim();
     if (!q) {
       return NextResponse.json(
         { code: 'BAD_REQUEST', message: 'Query param q is required', operationId },
@@ -30,11 +58,11 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // 3) Fetch one image using your composite imageFetcher
-    // Hint the provider preference to Google CSE if configured;
-    // imageFetcher should fall back automatically to others.
-    const img = await fetchOneImage(q, { prefer: ['google'] });
+    // Lazy-import the image fetcher to avoid any import-time side effects
+    const { fetchOneImage } = await import('@/app/lib/imageFetcher');
 
+    // Prefer Google CSE if configured; your imageFetcher will fall back as needed
+    const img = await fetchOneImage(q, { prefer: ['google'] });
     if (!img) {
       return NextResponse.json(
         { code: 'IMAGE_FETCH_FAILED', message: 'No provider returned image', operationId, details: { q } },
@@ -42,12 +70,11 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    // 4) Success — image should already be uploaded by imageFetcher and include publicUrl + attribution
     return NextResponse.json({ ok: true, image: img, operationId }, { status: 200 });
   } catch (err: any) {
-    return NextResponse.json(
-      { code: 'INTERNAL_ERROR', message: err?.message || 'Unknown', operationId },
-      { status: 500 }
-    );
+    const code = err?.code === 'ENV_MISSING' ? 'ENV_MISSING' : 'INTERNAL_ERROR';
+    const message = err?.message || 'Unknown error';
+    return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
+
