@@ -40,7 +40,6 @@ async function validateBearerUserId(authHeader: string | null): Promise<string |
   return data.user.id;
 }
 
-// small helper: build a good mock itinerary (with image queries)
 function buildMockItinerary(body: ReqBody) {
   const dest = body.destination;
   return {
@@ -49,30 +48,23 @@ function buildMockItinerary(body: ReqBody) {
       {
         day: 1,
         theme: 'Arrival & First Glimpse',
-        places: [dest + ' Main Square', dest + ' Old Town'],
-        details:
-          `Arrive in ${dest}, check in, and take an easy walk to get oriented. Try a local cafe and watch the city wake up.`,
-        images: [
-          { query: `${dest} skyline sunrise`, caption: 'Sunrise skyline', reason: 'Arrival vibes' },
-        ],
+        places: [`${dest} Main Square`, `${dest} Old Town`],
+        details: `Arrive in ${dest}, check in, and take an easy walk to get oriented. Try a local cafe and watch the city wake up.`,
+        images: [{ query: `${dest} skyline sunrise`, caption: 'Sunrise skyline', reason: 'Arrival vibes' }],
       },
       {
         day: 2,
         theme: 'Highlights & Must-Sees',
         places: ['Iconic Spot A', 'Iconic Spot B'],
         details: `Spend the day at the top highlights. Consider timed entries to avoid queues.`,
-        images: [
-          { query: `${dest} landmarks`, caption: 'Landmarks', reason: 'Core highlights' },
-        ],
+        images: [{ query: `${dest} landmarks`, caption: 'Landmarks', reason: 'Core highlights' }],
       },
       {
         day: 3,
         theme: 'Local Life & Chill',
         places: ['Neighborhood market', 'Park by the water'],
         details: `Slow down, explore markets, and enjoy a relaxed lunch. Perfect wrap-up before departure.`,
-        images: [
-          { query: `${dest} street market`, caption: 'Market life', reason: 'Local culture' },
-        ],
+        images: [{ query: `${dest} street market`, caption: 'Market life', reason: 'Local culture' }],
       },
     ],
   };
@@ -88,7 +80,6 @@ export async function POST(req: NextRequest) {
     const env = getEnv();
     const body = (await req.json()) as ReqBody;
 
-    // validate inputs
     if (!body?.destination || !body?.startDate || !body?.endDate) {
       return NextResponse.json(
         { code: 'BAD_REQUEST', message: 'destination, startDate, endDate are required', operationId },
@@ -96,7 +87,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // require a valid user token because we upload to storage
+    // Require auth (we upload to storage)
     const userId = await validateBearerUserId(req.headers.get('authorization'));
     if (!userId) {
       return NextResponse.json(
@@ -105,19 +96,15 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // always lazy-import heavy libs
     const { fetchImagesForItinerary } = await import('@/app/lib/imageFetcher');
 
-    // MOCK path (image pipeline enabled)
     if (env.USE_MOCK === 1) {
       const itineraryJson = buildMockItinerary(body);
       const withImages = await fetchImagesForItinerary(itineraryJson, { bucket: env.SUPABASE_IMAGE_BUCKET, operationId });
-      const markdown =
-        `# ${withImages.title}\n` + withImages.days.map((d: any) => `- Day ${d.day}: ${d.theme}`).join('\n');
+      const markdown = `# ${withImages.title}\n` + withImages.days.map((d: any) => `- Day ${d.day}: ${d.theme}`).join('\n');
       return NextResponse.json({ itineraryJson: withImages, markdown, operationId }, { status: 200 });
     }
 
-    // REAL path (when you add OpenAI creds later)
     const { getStrictItinerary } = await import('@/app/lib/openai');
     const itineraryJson = await getStrictItinerary(body, {
       model: env.OPENAI_MODEL,
@@ -125,8 +112,7 @@ export async function POST(req: NextRequest) {
       operationId,
     });
     const withImages = await fetchImagesForItinerary(itineraryJson, { bucket: env.SUPABASE_IMAGE_BUCKET, operationId });
-    const markdown =
-      `# ${withImages.title}\n` + withImages.days.map((d: any) => `- Day ${d.day}: ${d.theme}`).join('\n');
+    const markdown = `# ${withImages.title}\n` + withImages.days.map((d: any) => `- Day ${d.day}: ${d.theme}`).join('\n');
     return NextResponse.json({ itineraryJson: withImages, markdown, operationId }, { status: 200 });
   } catch (err: any) {
     const message = err?.message || 'Unknown error';
