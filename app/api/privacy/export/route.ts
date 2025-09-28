@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Avoid static optimization
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const runtime = 'nodejs';
@@ -39,9 +38,7 @@ async function writeAuditEvent(client: any, user_id: string, operationId: string
       type: 'privacy.export',
       payload: { user_id, operationId, ...payload },
     });
-  } catch {
-    // best-effort only
-  }
+  } catch { /* best-effort only */ }
 }
 
 export async function GET(req: NextRequest) {
@@ -64,29 +61,50 @@ export async function GET(req: NextRequest) {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const [userRes, tripsRes, ordersRes, orderItemsRes, cartItemsRes] = await Promise.all([
-      anon.from('users').select('*').eq('id', user_id).maybeSingle(),
-      anon.from('trips').select('*').eq('user_id', user_id),
-      anon.from('orders').select('*').eq('user_id', user_id),
-      anon.from('order_items').select('*'),
-      anon.from('cart_items').select('*').eq('user_id', user_id),
-    ]);
-
-    for (const r of [userRes, tripsRes, ordersRes, orderItemsRes, cartItemsRes]) {
-      if (r.error) {
-        return NextResponse.json({ code: 'DB_ERROR', message: r.error.message, operationId }, { status: 500 });
-      }
+    // 1) User (RLS)
+    const userRes = await anon.from('users').select('*').eq('id', user_id).maybeSingle();
+    if (userRes.error) {
+      return NextResponse.json({ code: 'DB_ERROR', message: userRes.error.message, operationId }, { status: 500 });
     }
 
-    const user = userRes.data || null;
+    // 2) Trips owned by user
+    const tripsRes = await anon.from('trips').select('*').eq('user_id', user_id);
+    if (tripsRes.error) {
+      return NextResponse.json({ code: 'DB_ERROR', message: tripsRes.error.message, operationId }, { status: 500 });
+    }
     const trips = tripsRes.data || [];
-    const orders = ordersRes.data || [];
-    const order_items_all = orderItemsRes.data || [];
+    const tripIds = trips.map((t: any) => t.id);
+
+    // 3) Orders for those trips (orders.trip_id IN tripIds)
+    let orders: any[] = [];
+    if (tripIds.length > 0) {
+      const ordersRes = await anon.from('orders').select('*').in('trip_id', tripIds);
+      if (ordersRes.error) {
+        return NextResponse.json({ code: 'DB_ERROR', message: ordersRes.error.message, operationId }, { status: 500 });
+      }
+      orders = ordersRes.data || [];
+    }
+
+    // 4) Order items, filtered to these orders
+    let order_items: any[] = [];
+    if (orders.length > 0) {
+      const orderIds = orders.map((o: any) => o.id);
+      const orderItemsRes = await anon.from('order_items').select('*');
+      if (orderItemsRes.error) {
+        return NextResponse.json({ code: 'DB_ERROR', message: orderItemsRes.error.message, operationId }, { status: 500 });
+      }
+      const allItems = orderItemsRes.data || [];
+      order_items = allItems.filter((oi: any) => orderIds.includes(oi.order_id));
+    }
+
+    // 5) Cart items for user
+    const cartItemsRes = await anon.from('cart_items').select('*').eq('user_id', user_id);
+    if (cartItemsRes.error) {
+      return NextResponse.json({ code: 'DB_ERROR', message: cartItemsRes.error.message, operationId }, { status: 500 });
+    }
     const cart_items = cartItemsRes.data || [];
 
-    const orderIds = new Set(orders.map((o: any) => o.id));
-    const order_items = order_items_all.filter((oi: any) => orderIds.has(oi.order_id));
-
+    // Audit (best-effort)
     await writeAuditEvent(anon, user_id, operationId, {
       counts: {
         trips: trips.length,
@@ -98,7 +116,16 @@ export async function GET(req: NextRequest) {
     });
 
     return NextResponse.json(
-      { ok: true, source: 'live', user, trips, orders, order_items, cart_items, operationId },
+      {
+        ok: true,
+        source: 'live',
+        user: userRes.data || null,
+        trips,
+        orders,
+        order_items,
+        cart_items,
+        operationId,
+      },
       { status: 200 }
     );
   } catch (err: any) {
@@ -107,4 +134,3 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
-
