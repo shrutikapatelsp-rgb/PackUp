@@ -61,7 +61,7 @@ export async function DELETE(req: NextRequest) {
 
     const deleted: DeletedCounts = { order_items: 0, orders: 0, cart_items: 0, trips: 0, users: 0 };
 
-    // 1) Trips owned by user
+    // 1) Trips for this user
     const tripsRes = await srv.from('trips').select('id').eq('user_id', user_id);
     if (tripsRes.error) {
       return NextResponse.json({ code: 'DB_ERROR', message: tripsRes.error.message, operationId }, { status: 500 });
@@ -69,17 +69,16 @@ export async function DELETE(req: NextRequest) {
     const tripIds = (tripsRes.data || []).map((t: any) => t.id);
 
     // 2) Orders for those trips
-    let ordersList: any[] = [];
+    let orderIds: string[] = [];
     if (tripIds.length > 0) {
       const ordersRes = await srv.from('orders').select('id').in('trip_id', tripIds);
       if (ordersRes.error) {
         return NextResponse.json({ code: 'DB_ERROR', message: ordersRes.error.message, operationId }, { status: 500 });
       }
-      ordersList = ordersRes.data || [];
+      orderIds = (ordersRes.data || []).map((o: any) => o.id);
     }
-    const orderIds = ordersList.map((o: any) => o.id);
 
-    // 3) Delete order_items first (FK-safe)
+    // 3) Delete order_items → then orders
     if (orderIds.length > 0) {
       const delOrderItems = await srv.from('order_items').delete().in('order_id', orderIds).select('id');
       if (delOrderItems.error) {
@@ -88,7 +87,6 @@ export async function DELETE(req: NextRequest) {
       deleted.order_items = delOrderItems.data?.length || 0;
     }
 
-    // 4) Delete orders
     if (tripIds.length > 0) {
       const delOrders = await srv.from('orders').delete().in('trip_id', tripIds).select('id');
       if (delOrders.error) {
@@ -97,24 +95,24 @@ export async function DELETE(req: NextRequest) {
       deleted.orders = delOrders.data?.length || 0;
     }
 
-    // 5) Delete cart_items for user
+    // 4) Delete cart_items for user
     const delCart = await srv.from('cart_items').delete().eq('user_id', user_id).select('id');
     if (delCart.error) {
       return NextResponse.json({ code: 'DB_ERROR', message: delCart.error.message, operationId }, { status: 500 });
     }
     deleted.cart_items = delCart.data?.length || 0;
 
-    // 6) Delete trips for user
+    // 5) Delete trips
     const delTrips = await srv.from('trips').delete().eq('user_id', user_id).select('id');
     if (delTrips.error) {
       return NextResponse.json({ code: 'DB_ERROR', message: delTrips.error.message, operationId }, { status: 500 });
     }
     deleted.trips = delTrips.data?.length || 0;
 
-    // 7) Delete or anonymize user
+    // 6) Delete or anonymize user
     const delUsers = await srv.from('users').delete().eq('id', user_id).select('id');
     if (delUsers.error) {
-      // anonymize fallback (if FKs prevent delete)
+      // anonymize (fallback if FK prevents delete)
       await srv.from('users').update({ email: null, display_name: null }).eq('id', user_id);
     } else {
       deleted.users = delUsers.data?.length || 0;
