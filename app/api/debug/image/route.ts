@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Avoid static optimization / build-time evaluation
 export const dynamic = 'force-dynamic';
 export const revalidate = 0;
 export const runtime = 'nodejs';
@@ -34,13 +33,10 @@ async function validateBearerUserId(authHeader: string | null): Promise<string |
 }
 
 export async function GET(req: NextRequest) {
-  // Use crypto.randomUUID() to avoid importing uuid at top-level
-  const operationId = typeof crypto !== 'undefined' && 'randomUUID' in crypto
-    ? crypto.randomUUID()
-    : Math.random().toString(36).slice(2);
+  const operationId =
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
 
   try {
-    // Auth (user access token)
     const userId = await validateBearerUserId(req.headers.get('authorization'));
     if (!userId) {
       return NextResponse.json(
@@ -52,17 +48,12 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const q = searchParams.get('q')?.trim();
     if (!q) {
-      return NextResponse.json(
-        { code: 'BAD_REQUEST', message: 'Query param q is required', operationId },
-        { status: 400 }
-      );
+      return NextResponse.json({ code: 'BAD_REQUEST', message: 'Query param q is required', operationId }, { status: 400 });
     }
 
-    // Lazy-import the image fetcher to avoid any import-time side effects
     const { fetchOneImage } = await import('@/app/lib/imageFetcher');
-
-    // Prefer Google CSE if configured; your imageFetcher will fall back as needed
     const img = await fetchOneImage(q, { prefer: ['google'] });
+
     if (!img) {
       return NextResponse.json(
         { code: 'IMAGE_FETCH_FAILED', message: 'No provider returned image', operationId, details: { q } },
@@ -77,4 +68,5 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
+EOF
 
