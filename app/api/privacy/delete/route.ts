@@ -112,7 +112,6 @@ export async function DELETE(req: NextRequest) {
     // 6) Delete or anonymize user
     const delUsers = await srv.from('users').delete().eq('id', user_id).select('id');
     if (delUsers.error) {
-      // anonymize (fallback if FK prevents delete)
       await srv.from('users').update({ email: null, display_name: null }).eq('id', user_id);
     } else {
       deleted.users = delUsers.data?.length || 0;
