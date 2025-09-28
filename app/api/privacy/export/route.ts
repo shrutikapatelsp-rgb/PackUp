@@ -41,6 +41,43 @@ async function writeAuditEvent(client: any, user_id: string, operationId: string
   } catch { /* best-effort only */ }
 }
 
+/**
+ * Try to resolve how to filter cart_items for a user.
+ * Prefer direct user column (user_id, userId, owner_id, customer_id).
+ * If none exist, and user has trips, fall back to trip_id IN (<user's trips>).
+ * Returns: { mode: 'userColumn', column: string } | { mode: 'tripJoin' }
+ */
+async function resolveCartItemsFilter(anon: any, user_id: string, tripIds: string[]) {
+  const candidates = ['user_id', 'userId', 'owner_id', 'customer_id'];
+  for (const col of candidates) {
+    const trial = await anon.from('cart_items').select('id').eq(col as any, user_id).limit(1);
+    if (trial.error) {
+      // if column truly doesn't exist -> error message usually says "column ... does not exist"
+      if (/does not exist/i.test(String(trial.error.message))) {
+        continue; // try next candidate
+      }
+      // other errors (RLS etc) — still assume column exists and use it
+      return { mode: 'userColumn' as const, column: col };
+    } else {
+      // no error — column exists (maybe 0 rows). Use it.
+      return { mode: 'userColumn' as const, column: col };
+    }
+  }
+
+  if (tripIds.length > 0) {
+    // sanity trial: if trip_id column exists, this returns without "does not exist"
+    const trial = await anon.from('cart_items').select('id').in('trip_id' as any, tripIds).limit(1);
+    if (!trial.error || !/does not exist/i.test(String(trial.error?.message || ''))) {
+      return { mode: 'tripJoin' as const };
+    }
+  }
+
+  // Give up with a clear diagnostic
+  const err: any = new Error('cart_items has neither user column nor usable trip_id');
+  err.code = 'DB_SCHEMA_MISSING';
+  throw err;
+}
+
 export async function GET(req: NextRequest) {
   const operationId =
     typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : Math.random().toString(36).slice(2);
@@ -97,12 +134,35 @@ export async function GET(req: NextRequest) {
       order_items = allItems.filter((oi: any) => orderIdSet.has(oi.order_id));
     }
 
-    // 5) Cart items for user (RLS read)
-    const cartItemsRes = await anon.from('cart_items').select('*').eq('user_id', user_id);
-    if (cartItemsRes.error) {
-      return NextResponse.json({ code: 'DB_ERROR', message: cartItemsRes.error.message, operationId }, { status: 500 });
+    // 5) Cart items for user — adaptive
+    let cart_items: any[] = [];
+    try {
+      const filter = await resolveCartItemsFilter(anon, user_id, tripIds);
+      if (filter.mode === 'userColumn') {
+        const cartItemsRes = await anon.from('cart_items').select('*').eq(filter.column as any, user_id);
+        if (cartItemsRes.error) {
+          return NextResponse.json({ code: 'DB_ERROR', message: cartItemsRes.error.message, operationId }, { status: 500 });
+        }
+        cart_items = cartItemsRes.data || [];
+      } else {
+        // tripJoin
+        if (tripIds.length > 0) {
+          const cartItemsRes = await anon.from('cart_items').select('*').in('trip_id', tripIds);
+          if (cartItemsRes.error) {
+            return NextResponse.json({ code: 'DB_ERROR', message: cartItemsRes.error.message, operationId }, { status: 500 });
+          }
+          cart_items = cartItemsRes.data || [];
+        } else {
+          cart_items = [];
+        }
+      }
+    } catch (e: any) {
+      // If schema really lacks both options, return structured error
+      if (e?.code === 'DB_SCHEMA_MISSING') {
+        return NextResponse.json({ code: 'DB_SCHEMA_MISSING', message: e.message, operationId }, { status: 500 });
+      }
+      return NextResponse.json({ code: 'DB_ERROR', message: e?.message || 'Cart items fetch failed', operationId }, { status: 500 });
     }
-    const cart_items = cartItemsRes.data || [];
 
     // Audit (best-effort)
     await writeAuditEvent(anon, user_id, operationId, {
