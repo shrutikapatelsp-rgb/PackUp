@@ -138,6 +138,5 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
-EOF
 
 

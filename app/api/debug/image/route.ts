@@ -68,5 +68,4 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ code, message, operationId }, { status: 500 });
   }
 }
-EOF
 
